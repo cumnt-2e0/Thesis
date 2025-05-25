@@ -1,25 +1,41 @@
+# env/builder.py
+
 import pandapower as pp
 import pandas as pd
 import numpy as np
 from .constants import LOAD_PRIORITIES
 
 def build_microgrid():
-    # Create an empty pandapower network
     net = pp.create_empty_network()
 
-    # Create 16 buses with nominal voltage of 0.4kV and store in dictionary
+    # --- Create 18 Buses (added virtual switch buses 16 and 17) ---
     buses = {}
-    for i in range(16):
+    for i in range(18):
         buses[i] = pp.create_bus(net, vn_kv=0.4, name=f"Bus {i}")
 
-    # Slack bus represents connection to the grid
+    # --- Slack and Generator Buses ---
     pp.create_ext_grid(net, bus=buses[0], vm_pu=1.0, name="Slack Bus")
+    pp.create_gen(net, bus=buses[15], p_mw=0.04, vm_pu=1.0, slack=True, name="Blackstart GenSet")
 
-    # Physical line connections between buses
-    # each line has a resistance, reactance, and max current rating
+    # --- Lines ---
     lines = [
-        (0, 1), (1, 2), (2, 3), (3, 4), (2, 5), (5, 6), (1, 7), (7, 8),
-        (0, 9), (9, 10), (10, 11), (10, 12), (12, 13), (12, 14), (9, 15)
+        (0, 1),   # Line 0
+        (1, 2),   # Line 1
+        (2, 3),   # Line 2
+        (2, 4),   # Line 3
+        (2, 5),   # Line 4
+        (5, 6),   # Line 5
+        (6, 7),   # Line 6
+        (7, 8),   # Line 7
+        (0, 9),   # Line 8
+        (9, 10),  # Line 9
+        (10, 11), # Line10
+        (10, 12), # Line11
+        (13, 16), # Line12 (Critical Load via SW5)
+        (11, 17), # Line13 (Important Load via SW6)
+        (16, 14), # Line14
+        (17, 14), # Line15
+        (0, 15)   # Line16
     ]
     for idx, (from_bus, to_bus) in enumerate(lines):
         pp.create_line_from_parameters(
@@ -28,46 +44,42 @@ def build_microgrid():
             max_i_ka=0.14, name=f"Line {idx}"
         )
 
-    # Switches placed on lines for reconfiguration
-    switches = [(1, 1), (3, 2), (5, 4), (6, 5), (7, 6), (8, 7), (12, 13), (9, 14)]
-    for i, (bus, element) in enumerate(switches):
-        pp.create_switch(net, bus=buses[bus], element=element, et="l", closed=True, name=f"SW{i+1}")
+    # --- Switches ---
+    switches = [
+        (0, 0),    # SW1
+        (2, 2),    # SW2
+        (2, 3),    # SW3
+        (2, 4),    # SW4
+        (13, 12),  # SW5: on line to Bus 16
+        (11, 13),  # SW6: on line to Bus 17
+        (0, 16)    # SW7
+    ]
+    for i, (bus, line_idx) in enumerate(switches):
+        pp.create_switch(net, bus=buses[bus], element=line_idx, et="l", closed=True, type="LBS", name=f"SW{i+1}")
 
-    # static generators (sgen) representing distributed energy resources
-    # produce power into the system
+    # --- DERs ---
     pp.create_sgen(net, bus=buses[1], p_mw=0.03, name="DER1 - Solar")
-    pp.create_sgen(net, bus=buses[5], p_mw=0.02, name="DER2 - Wind")
-    pp.create_sgen(net, bus=buses[13], p_mw=0.025, name="DER3 - CHP")
+    pp.create_sgen(net, bus=buses[12], p_mw=0.025, name="DER2 - CHP")
 
-    # Blackstart genset for restoring power after outages
-    # later exploration can occur on required capacity and characteristics
-    pp.create_gen(net, bus=buses[15], p_mw=0.04, vm_pu=1.0, slack=True, name="Blackstart GenSet")
-
-    # battery storage systems with max capacity and state of charge
-    pp.create_storage(net, bus=buses[6], p_mw=0.01, max_e_mwh=0.05, soc_percent=50, name="Battery 1")
+    # --- Batteries ---
+    pp.create_storage(net, bus=buses[5], p_mw=0.01, max_e_mwh=0.05, soc_percent=50, name="Battery 1")
     pp.create_storage(net, bus=buses[11], p_mw=0.015, max_e_mwh=0.06, soc_percent=60, name="Battery 2")
 
-    # Attaches real loads to specific buses
-    # each one is tagged with a priority level (3,2,1) = (critical, important, non-critical)
+    # --- Loads with Priorities ---
     for bus, priority in LOAD_PRIORITIES.items():
         pp.create_load(net, bus=buses[bus], p_mw=0.02, name=f"Load Bus {bus}")
 
-    # Store priorities in net.load DataFrame
     net.load["priority"] = [LOAD_PRIORITIES[bus] for bus in net.load.bus]
-    
+
+    # --- Coordinates ---
     coords = {
-        0: (0, 0), 1: (1, 0), 2: (2, 0), 3: (3, 1), 4: (4, 1),
-        5: (2, -1), 6: (3, -1), 7: (1, 1), 8: (2, 2), 9: (0, 1),
-        10: (1, 2), 11: (2, 3), 12: (3, 3), 13: (4, 3), 14: (3, 4), 15: (-1, 0)
+        0: (0, 0), 1: (1, 0), 2: (2, 0), 3: (3, 1), 4: (3, -1),
+        5: (2, -1.5), 6: (3, -1.5), 7: (4, -1.5), 8: (5, -1.5),
+        9: (1, 1), 10: (2, 1), 11: (3, 1.5), 12: (3, 2),
+        13: (4, 2), 14: (5, 2), 15: (-1, 0),
+        16: (4.5, 2), 17: (4.5, 1.5)  # Virtual switch nodes
     }
-
-    # Ensure proper DataFrame with correct dtypes and labels
-    bus_geodata_df = pd.DataFrame(coords).T
-    bus_geodata_df.columns = ["x", "y"]
-    bus_geodata_df.index.name = "bus"
-
-    # Assign it to the net object
+    bus_geodata_df = pd.DataFrame.from_dict(coords, orient="index", columns=["x", "y"])
     net.bus_geodata = bus_geodata_df.astype(np.float64)
 
-    # return the constructed pandapower network
     return net
