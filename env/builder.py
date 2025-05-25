@@ -1,5 +1,6 @@
 import pandapower as pp
 import pandas as pd
+import numpy as np
 from .constants import LOAD_PRIORITIES
 
 def build_microgrid():
@@ -28,7 +29,7 @@ def build_microgrid():
         )
 
     # Switches placed on lines for reconfiguration
-    switches = [(1, 1), (3, 2), (5, 4), (6, 5), (7, 6), (8, 7), (12, 13), (14, 14)]
+    switches = [(1, 1), (3, 2), (5, 4), (6, 5), (7, 6), (8, 7), (12, 13), (9, 14)]
     for i, (bus, element) in enumerate(switches):
         pp.create_switch(net, bus=buses[bus], element=element, et="l", closed=True, name=f"SW{i+1}")
 
@@ -53,14 +54,20 @@ def build_microgrid():
 
     # Store priorities in net.load DataFrame
     net.load["priority"] = [LOAD_PRIORITIES[bus] for bus in net.load.bus]
-
-    # Set geodata for buses to visualise the network layout
+    
     coords = {
         0: (0, 0), 1: (1, 0), 2: (2, 0), 3: (3, 1), 4: (4, 1),
         5: (2, -1), 6: (3, -1), 7: (1, 1), 8: (2, 2), 9: (0, 1),
         10: (1, 2), 11: (2, 3), 12: (3, 3), 13: (4, 3), 14: (3, 4), 15: (-1, 0)
     }
-    net.bus_geodata = pd.DataFrame.from_dict({buses[k]: {"x": x, "y": y} for k, (x, y) in coords.items()}, orient="index")
+
+    # Ensure proper DataFrame with correct dtypes and labels
+    bus_geodata_df = pd.DataFrame(coords).T
+    bus_geodata_df.columns = ["x", "y"]
+    bus_geodata_df.index.name = "bus"
+
+    # Assign it to the net object
+    net.bus_geodata = bus_geodata_df.astype(np.float64)
 
     # return the constructed pandapower network
     return net

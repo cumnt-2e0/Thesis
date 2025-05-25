@@ -7,3 +7,5 @@ env/lib/
 env/lib64/
 env/share/
 env/pyvenv.cfg
+tests/
+temp-plot.html

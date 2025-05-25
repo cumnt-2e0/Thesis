@@ -2,9 +2,13 @@ from env.microgrid_env import MicrogridEnv
 
 env = MicrogridEnv()
 obs = env.reset()
+done = False
 
-for _ in range(10):
-    obs, reward, done, info = env.step(env.action_space.sample())
-    print(f"Step {_+1}, Done: {done}")
+print("Initial observation:", obs)
 
-env.render()
+while not done:
+    action = env.action_space.sample()  # Random action for now
+    obs, reward, done, info = env.step(action)
+    print(f"Step: {env.current_step}, Action: {action}, Done: {done}")
+
+env.render()  # Open visual layout of the network
