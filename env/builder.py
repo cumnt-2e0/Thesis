@@ -1,53 +1,66 @@
 import pandapower as pp
 import pandas as pd
+from .constants import LOAD_PRIORITIES
 
 def build_microgrid():
+    # Create an empty pandapower network
     net = pp.create_empty_network()
 
-    # --- Buses ---
-    b0 = pp.create_bus(net, vn_kv=0.4, name="Slack (B0)")
-    b1 = pp.create_bus(net, vn_kv=0.4, name="DER1 (B1)")
-    b2 = pp.create_bus(net, vn_kv=0.4, name="Mid (B2)")
-    b3 = pp.create_bus(net, vn_kv=0.4, name="Critical Load 1 (B3)")
-    b4 = pp.create_bus(net, vn_kv=0.4, name="Non-Critical Load 1 (B4)")
-    b5 = pp.create_bus(net, vn_kv=0.4, name="DER2 (B5)")
-    b6 = pp.create_bus(net, vn_kv=0.4, name="Critical Load 2 (B6)")
-    b7 = pp.create_bus(net, vn_kv=0.4, name="Non-Critical Load 2 (B7)")
-    b8 = pp.create_bus(net, vn_kv=0.4, name="DER3 (B8)")
+    # Create 16 buses with nominal voltage of 0.4kV and store in dictionary
+    buses = {}
+    for i in range(16):
+        buses[i] = pp.create_bus(net, vn_kv=0.4, name=f"Bus {i}")
 
-    # --- Slack ---
-    pp.create_ext_grid(net, bus=b0, vm_pu=1.0, name="Slack")
+    # Slack bus represents connection to the grid
+    pp.create_ext_grid(net, bus=buses[0], vm_pu=1.0, name="Slack Bus")
 
-    # --- Lines ---
+    # Physical line connections between buses
+    # each line has a resistance, reactance, and max current rating
     lines = [
-        (b0, b1), (b1, b2), (b2, b3), (b2, b4),
-        (b4, b5), (b1, b6), (b6, b7), (b7, b8)
+        (0, 1), (1, 2), (2, 3), (3, 4), (2, 5), (5, 6), (1, 7), (7, 8),
+        (0, 9), (9, 10), (10, 11), (10, 12), (12, 13), (12, 14), (9, 15)
     ]
-    for i, (fb, tb) in enumerate(lines):
-        pp.create_line_from_parameters(net, fb, tb, 0.1, 0.32, 0.08, 210, 0.14, name=f"Line {i}")
+    for idx, (from_bus, to_bus) in enumerate(lines):
+        pp.create_line_from_parameters(
+            net, buses[from_bus], buses[to_bus], length_km=0.1,
+            r_ohm_per_km=0.32, x_ohm_per_km=0.08, c_nf_per_km=0,
+            max_i_ka=0.14, name=f"Line {idx}"
+        )
 
-    # --- Switches (on lines 1, 4, 6) ---
-    pp.create_switch(net, bus=b1, element=1, et="l", closed=True, name="SW1")  # B1-B2
-    pp.create_switch(net, bus=b4, element=4, et="l", closed=True, name="SW2")  # B4-B5
-    pp.create_switch(net, bus=b6, element=6, et="l", closed=True, name="SW3")  # B6-B7
+    # Switches placed on lines for reconfiguration
+    switches = [(1, 1), (3, 2), (5, 4), (6, 5), (7, 6), (8, 7), (12, 13), (14, 14)]
+    for i, (bus, element) in enumerate(switches):
+        pp.create_switch(net, bus=buses[bus], element=element, et="l", closed=True, name=f"SW{i+1}")
 
-    # --- DERs ---
-    pp.create_gen(net, bus=b1, p_mw=0.05, vm_pu=1.0, slack=True, name="MG1 - Black Start")
-    pp.create_sgen(net, bus=b5, p_mw=0.03, name="MG2 - Solar")
-    pp.create_sgen(net, bus=b8, p_mw=0.02, name="MG3 - Battery")
+    # static generators (sgen) representing distributed energy resources
+    # produce power into the system
+    pp.create_sgen(net, bus=buses[1], p_mw=0.03, name="DER1 - Solar")
+    pp.create_sgen(net, bus=buses[5], p_mw=0.02, name="DER2 - Wind")
+    pp.create_sgen(net, bus=buses[13], p_mw=0.025, name="DER3 - CHP")
 
-    # --- Loads ---
-    pp.create_load(net, bus=b3, p_mw=0.02, name="Critical Load 1")
-    pp.create_load(net, bus=b6, p_mw=0.015, name="Critical Load 2")
-    pp.create_load(net, bus=b4, p_mw=0.02, name="Non-Critical Load 1")
-    pp.create_load(net, bus=b7, p_mw=0.01, name="Non-Critical Load 2")
-    net.load["priority"] = [1, 1, 0, 0]
+    # Blackstart genset for restoring power after outages
+    # later exploration can occur on required capacity and characteristics
+    pp.create_gen(net, bus=buses[15], p_mw=0.04, vm_pu=1.0, slack=True, name="Blackstart GenSet")
 
-    # --- Geodata for Layout ---
+    # battery storage systems with max capacity and state of charge
+    pp.create_storage(net, bus=buses[6], p_mw=0.01, max_e_mwh=0.05, soc_percent=50, name="Battery 1")
+    pp.create_storage(net, bus=buses[11], p_mw=0.015, max_e_mwh=0.06, soc_percent=60, name="Battery 2")
+
+    # Attaches real loads to specific buses
+    # each one is tagged with a priority level (3,2,1) = (critical, important, non-critical)
+    for bus, priority in LOAD_PRIORITIES.items():
+        pp.create_load(net, bus=buses[bus], p_mw=0.02, name=f"Load Bus {bus}")
+
+    # Store priorities in net.load DataFrame
+    net.load["priority"] = [LOAD_PRIORITIES[bus] for bus in net.load.bus]
+
+    # Set geodata for buses to visualise the network layout
     coords = {
-        b0: (0, 0), b1: (1, 0), b2: (2, 0), b3: (3, 1), b4: (3, -1),
-        b5: (4, -1), b6: (1, 1), b7: (2, 1), b8: (3, 2)
+        0: (0, 0), 1: (1, 0), 2: (2, 0), 3: (3, 1), 4: (4, 1),
+        5: (2, -1), 6: (3, -1), 7: (1, 1), 8: (2, 2), 9: (0, 1),
+        10: (1, 2), 11: (2, 3), 12: (3, 3), 13: (4, 3), 14: (3, 4), 15: (-1, 0)
     }
-    net.bus_geodata = pd.DataFrame.from_dict({k: {"x": x, "y": y} for k, (x, y) in coords.items()}, orient="index")
+    net.bus_geodata = pd.DataFrame.from_dict({buses[k]: {"x": x, "y": y} for k, (x, y) in coords.items()}, orient="index")
 
+    # return the constructed pandapower network
     return net
