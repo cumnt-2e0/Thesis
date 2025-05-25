@@ -1,0 +1,9 @@
+CRITICAL_LOAD_BUS = 3
+NON_CRITICAL_LOAD_BUS = 4
+DER2_BUS = 5
+
+SWITCH_INDICES = {
+    "SW1": 0,
+    "SW2": 1,
+    "SW3": 2
+}

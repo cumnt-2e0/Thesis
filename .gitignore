@@ -1,0 +1,9 @@
+# Ignore Files
+data/
+env/__pycache__/
+env/bin/
+env/include/
+env/lib/
+env/lib64/
+env/share/
+env/pyvenv.cfg
