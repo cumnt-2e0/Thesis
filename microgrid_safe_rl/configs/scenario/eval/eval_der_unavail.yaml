@@ -1,0 +1,13 @@
+# configs/scenario/eval/eval_der_unavail.yaml
+
+enabled: true
+modes: []              # no line/load faults
+severity: 0.0
+
+der_unavailability:
+  static_on_reset: true
+  disable_frac: 0.3          # knock out ~30% of DERs per episode
+  scaling_range: [0.8, 1.0]  # survivors scaled 80–100%
+  p_deficit_frac: [0.0, 0.0] # optional extra bound, but set to 0 if you just want outages
+
+episodes: 30

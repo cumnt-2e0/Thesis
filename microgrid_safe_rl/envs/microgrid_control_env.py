@@ -322,12 +322,15 @@ class MicrogridControlEnv(gym.Env):
             return  # nothing to do; bound will still shape behavior
 
         # 1) Random outages
-        for tb in der_tables:
-            df = getattr(self.net, tb)
-            if outage_p > 0 and len(df):
-                mask = rng.random(len(df)) > outage_p
-                df["in_service"] = mask.values if hasattr(mask, "values") else mask
-
+        disable_frac = float(cfg.get("disable_frac", 0.0))
+        if disable_frac > 0 and len(der_tables):
+            for tb in der_tables:
+                df = getattr(self.net, tb)
+                n_disable = int(np.floor(len(df) * disable_frac))
+                if n_disable > 0:
+                    to_disable = rng.choice(df.index, size=n_disable, replace=False)
+                    df.loc[to_disable, "in_service"] = False
+        
         # 2) Derate remaining DERs with a common scale * random jitter in [s_lo, s_hi]
         #    Try to aim the sum back to P_target (rough, but good enough to stress the agent).
         #    Use cached p_base_mw as the nominal capability.
