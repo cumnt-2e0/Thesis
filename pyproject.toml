@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "microgrid-safe-rl"
+version = "0.1.0"
+description = "Microgrid safe RL with pandapower, gymnasium, and stable-baselines3"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Your Name" }]
+dependencies = [
+  "gymnasium>=0.29",
+  "stable-baselines3>=2.3.0",
+  "torch>=2.2.0",
+  "pandas>=2.2.1",
+  "numpy>=1.26",
+  "pandapower>=2.15.0",
+  "PyYAML>=6.0.1",
+]
+
+[tool.setuptools]
+packages = { find = { include = ["microgrid_safe_rl*"] } }
+include-package-data = true
+
+[tool.setuptools.package-data]
+microgrid_safe_rl = ["configs/**/*.yaml"]
+
+[project.scripts]
+mgrl-train = "microgrid_safe_rl.scripts.train:main"
+mgrl-eval  = "microgrid_safe_rl.scripts.eval:main"
+mgrl-exp   = "microgrid_safe_rl.scripts.run_experiment:main"
+mgrl-smoke = "microgrid_safe_rl.scripts.smoke_feeders:main"

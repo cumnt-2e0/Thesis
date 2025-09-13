@@ -1,0 +1,8 @@
+gymnasium>=0.29
+stable-baselines3>=2.3.0
+torch>=2.2.0
+pandas>=2.2.1
+numpy>=1.26
+pandapower>=2.15.0
+PyYAML>=6.0.1
+pytest>=8.0.0

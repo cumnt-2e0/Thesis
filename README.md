@@ -1,0 +1,34 @@
+# microgrid_safe_rl — Microgrid Safe RL (Pandapower + Gymnasium + SB3)
+
+**Feeder-as-environment** RL stack for islanded microgrids. Four feeders supported out of the box:
+`ieee33`, `ieee123`, `cigre_mv`, `rte1888`.
+
+- Unified environment (`MicrogridControlEnv`) with Discrete actions:
+  - `0` = noop
+  - `1..K` = toggle switch k
+  - `K+1 .. K+2L` = per-load curtailment step (even=+shed, odd=−shed)
+- Augmentation ensures each feeder has switches, DERs, BESS, and auto-tags priorities:
+  Top 5% buses by demand → **critical**, next 10% → **important**.
+- Disturbances (line outage or load surge) injected on reset.
+- Reward: keep critical/important served, penalize voltage violation and shedding,
+  small switching penalty, bonus for successfully isolating a faulted line.
+
+## Install (editable)
+```bash
+python -m pip install -e .
+```
+
+## CLI
+```bash
+# Train on IEEE33
+mgrl-train --env_id ieee33 --total_timesteps 150000
+
+# Evaluate a saved model
+mgrl-eval --env_id ieee33 --model_path artifacts/models/ppo_ieee33 --episodes 5
+
+# Sanity across all feeders
+mgrl-smoke
+
+# Full 4-feeder experiment with CSV KPIs
+mgrl-exp --timesteps 100000 --episodes 3 --out artifacts/runs/summary.csv
+```

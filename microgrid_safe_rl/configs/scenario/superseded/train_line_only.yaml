@@ -1,0 +1,6 @@
+# line faults only during training; bias away from hard bridges to stabilize learning
+enabled: true
+modes: ['line']
+severity: 0.8
+exclude_bridges: true
+exclude_bridges_prob: 1.0

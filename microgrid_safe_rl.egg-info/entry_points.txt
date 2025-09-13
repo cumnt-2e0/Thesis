@@ -1,0 +1,5 @@
+[console_scripts]
+mgrl-eval = microgrid_safe_rl.scripts.eval:main
+mgrl-exp = microgrid_safe_rl.scripts.run_experiment:main
+mgrl-smoke = microgrid_safe_rl.scripts.smoke_feeders:main
+mgrl-train = microgrid_safe_rl.scripts.train:main

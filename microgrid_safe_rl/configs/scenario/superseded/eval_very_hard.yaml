@@ -1,0 +1,7 @@
+modes: ["line", "der"]   
+severity: 0.9
+der_unavailability:
+  static_on_reset: true
+  p_deficit_frac: [0.2, 0.6]
+  random_outage_prob: 0.5
+  scaling_range: [0.1, 0.7]

@@ -1,0 +1,3 @@
+enabled: true
+modes: ['load']
+severity: 0.2

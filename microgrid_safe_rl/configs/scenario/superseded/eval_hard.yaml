@@ -1,0 +1,5 @@
+# configs/scenario/eval_hard.yaml
+enabled: true
+modes: ["line"]
+severity: 0.9
+exclude_bridges: false   # allow bridges

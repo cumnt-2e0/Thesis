@@ -1,0 +1,22 @@
+# Train
+mgrl-train --env_id case145 --total_timesteps 120000 --progress \
+  --env_cfg env.yaml \
+  --scenario_cfg scenario/train_mixed.yaml
+
+# Restoration (easier)
+mgrl-eval --env_id case145 --model_path artifacts/models/ppo_case145_b3 \
+  --episodes 30 --env_cfg env.yaml \
+  --scenario_cfg scenario/eval_restoration.yaml \
+  --save_csv artifacts/models/case145_eval_b3_restoration.csv
+
+# Hard
+mgrl-eval --env_id case145 --model_path artifacts/models/ppo_case145_b3 \
+  --episodes 30 --env_cfg env.yaml \
+  --scenario_cfg scenario/eval_hard.yaml \
+  --save_csv artifacts/models/case145_eval_b3_hard.csv
+
+# Very hard
+mgrl-eval --env_id case145 --model_path artifacts/models/ppo_case145_b3 \
+  --episodes 30 --env_cfg env.yaml \
+  --scenario_cfg scenario/eval_very_hard.yaml \
+  --save_csv artifacts/models/case145_eval_b3_very_hard.csv

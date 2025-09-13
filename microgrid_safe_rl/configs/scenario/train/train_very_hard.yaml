@@ -1,0 +1,4 @@
+enabled: true
+modes: ["line", "load"]   # randomize between a live line fault or a load surge
+severity: 1.5             # pushes load surge factor up (env clamps to 2.0)
+exclude_bridges: false    # allow bridge faults (harder)

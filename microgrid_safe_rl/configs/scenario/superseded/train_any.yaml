@@ -1,0 +1,5 @@
+enabled: true
+modes: ['line']
+severity: 0.8
+exclude_bridges: false
+exclude_bridges_prob: 0.0

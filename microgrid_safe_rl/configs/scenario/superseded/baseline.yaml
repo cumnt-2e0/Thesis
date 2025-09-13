@@ -1,0 +1,3 @@
+enabled: true
+modes: ['line','load']
+severity: 0.8
