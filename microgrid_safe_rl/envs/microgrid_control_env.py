@@ -190,6 +190,9 @@ class MicrogridControlEnv(gym.Env):
 
             # Apply DER outages/derating (static per episode, if configured)
             self._apply_der_unavailability(seed=None if seed is None else seed + 1337 + t)
+            
+            if self.der_cfg.get("enabled", False):
+                print("[DEBUG] Applying DER unavailability with config:", self.der_cfg)
 
             # Rebuild K-sized switch subset AFTER we know the fault
             self.switch_ids = self._select_switch_subset(self.faulted_line)
@@ -276,7 +279,7 @@ class MicrogridControlEnv(gym.Env):
             if "q_mvar" in self.net.load.columns:
                 self.net.load.at[li, "q_mvar"] = float(self.net.load.at[li, "q_mvar"]) * f
 
-    # ------ DER unavailability helpers ------
+        # ------ DER unavailability helpers ------
     def _sample_der_bound_frac(self, rng) -> float:
         cfg = self.der_cfg or {}
         lo, hi = cfg.get("p_deficit_frac", [0.0, 0.0])
@@ -287,11 +290,7 @@ class MicrogridControlEnv(gym.Env):
         return float(np.clip(1.0 - deficit, 0.0, 1.0))
 
     def _apply_der_unavailability(self, seed=None):
-        """Optionally knock out and derate DERs to create a real supply shortfall.
-        Also store a per-episode DER bound fraction for reward shaping/metrics.
-        """
         if not self.der_cfg or not self.der_cfg.get("static_on_reset", False):
-            # even if we don't modify the net, still produce a bound for shaping if user configured p_deficit_frac
             rng = np.random.default_rng(seed)
             self._der_bound_frac_ep = self._sample_der_bound_frac(rng)
             return
@@ -300,12 +299,11 @@ class MicrogridControlEnv(gym.Env):
         cfg = self.der_cfg
         self._der_bound_frac_ep = self._sample_der_bound_frac(rng)
 
-        # Outage probability and scaling range for *remaining* DERs
         outage_p = float(cfg.get("random_outage_prob", 0.0))
         s_lo, s_hi = cfg.get("scaling_range", [0.5, 1.0])
         s_lo = float(s_lo); s_hi = float(max(s_hi, s_lo))
 
-        # Base total load (for a target)
+        # Base total load
         if len(self.net.load):
             if "p_base_mw" not in self.net.load.columns:
                 self.net.load["p_base_mw"] = self.net.load["p_mw"].astype(float)
@@ -313,27 +311,23 @@ class MicrogridControlEnv(gym.Env):
         else:
             P_L = 0.0
 
-        # Target available power for the episode (soft target)
+        # Target bound (fraction of load that should be feasible)
         P_target = self._der_bound_frac_ep * P_L
 
-        # Build a list of DER tables to manipulate
         der_tables = [tb for tb in ("gen", "sgen") if hasattr(self.net, tb) and len(getattr(self.net, tb))]
         if not der_tables:
-            return  # nothing to do; bound will still shape behavior
+            return
 
-        # 1) Random outages
-        disable_frac = float(cfg.get("disable_frac", 0.0))
-        if disable_frac > 0 and len(der_tables):
-            for tb in der_tables:
-                df = getattr(self.net, tb)
-                n_disable = int(np.floor(len(df) * disable_frac))
-                if n_disable > 0:
-                    to_disable = rng.choice(df.index, size=n_disable, replace=False)
-                    df.loc[to_disable, "in_service"] = False
-        
-        # 2) Derate remaining DERs with a common scale * random jitter in [s_lo, s_hi]
-        #    Try to aim the sum back to P_target (rough, but good enough to stress the agent).
-        #    Use cached p_base_mw as the nominal capability.
+        disabled = []
+        for tb in der_tables:
+            df = getattr(self.net, tb)
+            if len(df) and rng.random() < outage_p:
+                idx = int(rng.choice(df.index))
+                if df.at[idx, "in_service"]:
+                    disabled.append((tb, idx, df.at[idx, "p_mw"]))
+                    df.at[idx, "in_service"] = False
+
+        # Derating (common scale)
         bases = []
         for tb in der_tables:
             df = getattr(self.net, tb)
@@ -344,7 +338,7 @@ class MicrogridControlEnv(gym.Env):
                 bases.append(float(df.loc[m, "p_mw"].sum()))
         P_base_avail = float(sum(bases))
 
-        if P_base_avail > 1e-9 and len(der_tables):
+        if P_base_avail > 1e-9:
             common_scale = float(np.clip(P_target / P_base_avail, s_lo, s_hi))
             for tb in der_tables:
                 df = getattr(self.net, tb)
@@ -355,6 +349,22 @@ class MicrogridControlEnv(gym.Env):
                 else:
                     jitter = rng.uniform(s_lo, s_hi, size=int(m.sum()))
                     df.loc[m, "p_mw"] = df.loc[m, "p_mw"].values * (common_scale * jitter)
+
+        # Actual online capacity after outages/derating
+        P_online = 0.0
+        for tb in der_tables:
+            df = getattr(self.net, tb)
+            P_online += float(df.loc[df.in_service.astype(bool), "p_mw"].sum())
+
+        # Debug summary
+        if self.der_cfg.get("enabled", False):
+            print("[DEBUG] Disabled DERs:")
+            for tb, idx, p in disabled:
+                print(f"  - {tb}[{idx}] P={p:.2f} MW")
+            if not disabled:
+                print("  - None")
+            print(f"[DEBUG] Load={P_L:.2f} MW | Target={P_target:.2f} MW | Online={P_online:.2f} MW")
+
 
         # Note: ext_grid (slack) may still cover any mismatch; the *bound penalty* (below)
         # forces the agent to shed if it serves above the bound.

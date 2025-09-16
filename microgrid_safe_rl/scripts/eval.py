@@ -1,5 +1,5 @@
-# microgrid_safe_rl/scripts/eval.py
-import argparse, os, json, numpy as np
+#!/usr/bin/env python3
+import argparse, os, numpy as np
 from stable_baselines3 import PPO, SAC
 from microgrid_safe_rl.utils.config import load_yaml
 from microgrid_safe_rl.envs.factory import make_env
@@ -15,12 +15,11 @@ def parse_args():
     p.add_argument("--env_cfg", default="env.yaml")
     p.add_argument("--scenario_cfg", default="scenario/eval_line_only.yaml")
     p.add_argument("--save_csv", default=None)
+    p.add_argument("--nodes", type=int, default=None, help="Total buses in feeder (for shed calc)")
     return p.parse_args()
 
 def load_model(model_path, algo, env):
-    # allow either model.zip or directory with latest.zip-like
     if os.path.isdir(model_path):
-        # pick most recent .zip inside
         zips = [os.path.join(model_path, f) for f in os.listdir(model_path) if f.endswith(".zip")]
         assert len(zips) > 0, f"No .zip found in {model_path}"
         zips.sort(key=lambda p: os.path.getmtime(p), reverse=True)
@@ -77,15 +76,32 @@ def main():
     print(f"Served fractions @end: crit={np.mean(crit_frac):.3f}, imp={np.mean(imp_frac):.3f}, total={np.mean(tot_frac):.3f}")
     print(f"Avg reward over {args.episodes} eps: {np.mean(ep_rewards):.2f} ± {np.std(ep_rewards):.2f}")
 
-    # Optional CSV
+    # ---- Save CSV ----
     if args.save_csv:
         import csv
         os.makedirs(os.path.dirname(args.save_csv), exist_ok=True)
+        n_nodes = args.nodes or len(env.net.bus)
         with open(args.save_csv, "w", newline="") as f:
             w = csv.writer(f)
-            w.writerow(["episode","reward","steps","isolated","iso_step","served_total","served_crit","served_imp"])
-            for i,(R,S,ok,st,tf,cf,if_) in enumerate(zip(ep_rewards, ep_steps, success, iso_steps, tot_frac, crit_frac, imp_frac), start=1):
-                w.writerow([i, R, S, int(ok), (st if st is not None else -1), tf, cf, if_])
+            w.writerow([
+                "episode","reward","steps",
+                "isolated","iso_step",
+                "served_total","served_crit","served_imp",
+                "pf_success","shed_frac","shed_nodes"
+            ])
+            for i,(R,S,ok,st,tf,cf,if_,infs) in enumerate(
+                zip(ep_rewards, ep_steps, success, iso_steps, tot_frac, crit_frac, imp_frac, ep_infos),
+                start=1):
+                # PF success if at least one step succeeded
+                pf_ok = any(inf.get("powerflow_success", False) for inf in infs)
+                shed_frac = max(0.0, 1.0 - tf)
+                shed_nodes = int(round(shed_frac * n_nodes))
+                w.writerow([
+                    i, R, S,
+                    int(ok), (st if st is not None else -1),
+                    tf, cf, if_,
+                    int(pf_ok), shed_frac, shed_nodes
+                ])
         print(f"Saved metrics: {args.save_csv}")
 
 if __name__ == "__main__":
