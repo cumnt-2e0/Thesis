@@ -1,5 +1,0 @@
-# configs/scenario/eval/eval_der_unavail.yaml
-
-enabled: true
-modes: []              # no line/load faults
-severity: 0.0

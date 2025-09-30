@@ -52,7 +52,7 @@ def _get_positions(net, G):
             pos.update(fallback)
     else:
         print("[INFO] No geodata found, using spring layout")
-        pos = nx.spring_layout(G, seed=42, k=1.5 / max(1, np.sqrt(len(G.nodes)))))
+        pos = nx.spring_layout(G, seed=42, k=1.5 / max(1, np.sqrt(len(G.nodes))))
     return pos
 
 

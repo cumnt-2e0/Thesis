@@ -1,0 +1,12 @@
+enabled: true
+# Recommended: mix of line + load so the policy learns to handle outages
+modes: ["line", "load"]
+severity: 0.8
+
+# If you want cascades active in Phase C, leave on:
+cascading_line_faults: true
+cascade_prob: 0.3
+max_cascades: 2
+
+# Turn DER unavailability ON in this phase
+der: true

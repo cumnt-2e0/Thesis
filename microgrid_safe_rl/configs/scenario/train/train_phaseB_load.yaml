@@ -1,0 +1,13 @@
+env_id: case145
+total_timesteps: 1_000_000
+progress: true
+
+env_cfg: configs/env.yaml
+scenario_cfg: scenario/train/phaseB_load.yaml
+
+agent_cfg: configs/agent/ppo.yaml
+save_dir: artifacts/models/ppo_case145_phaseB
+tb_logdir: runs/ppo_case145_phaseB
+
+# Important: load pretrained Phase A
+model_path: artifacts/models/ppo_case145_phaseA/best

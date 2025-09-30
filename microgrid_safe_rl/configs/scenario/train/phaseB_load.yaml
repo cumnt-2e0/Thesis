@@ -1,0 +1,11 @@
+enabled: true
+modes: ["load"]
+severity: 0.8
+
+# Keep line faults off for Phase B
+cascading_line_faults: false
+max_cascades: 0
+cascade_prob: 0.0
+
+# Still no DER randomness
+der: false

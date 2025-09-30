@@ -1,9 +1,22 @@
-# configs/agent/ppo.yaml
 algo: ppo
-params:
-  n_steps: 2048
-  batch_size: 256
-  gamma: 0.95
-  ent_coef: 0.03
+total_timesteps: 1_000_000   # ceiling per run, overridden in training YAML if needed
+
+ppo:
   learning_rate: 3.0e-4
+  n_steps: 4096
+  batch_size: 2048
   n_epochs: 10
+  gamma: 0.995
+  gae_lambda: 0.95
+  clip_range: 0.15
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  policy: "MlpPolicy"
+  policy_kwargs:
+    net_arch:
+      pi: [256, 256]
+      vf: [256, 256]
+    activation_fn: "tan"
+
+

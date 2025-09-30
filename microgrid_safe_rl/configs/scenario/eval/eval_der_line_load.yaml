@@ -1,0 +1,7 @@
+# configs/scenario/eval/eval_der_unavail.yaml
+
+# enabled: true
+# modes: ["line", "load"]     # randomize across both
+# severity: 0.9               # keep it tough
+# exclude_bridges: true       # avoid unsplittable fault lines for stability
+# exclude_bridges_prob: 1.0
