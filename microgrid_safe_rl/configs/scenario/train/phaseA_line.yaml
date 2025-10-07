@@ -1,16 +1,15 @@
-# scenario/train/phaseA_line.yaml
 enabled: true
-modes: ["line"]          # as you had before
+modes: ["line"]
 severity: 0.8
-der: false                
+der: false
 exclude_bridges: true
-exclude_bridges_prob: 0.7
+exclude_bridges_prob: 1.0
 
 cascade:
   strategy: overload
-  max_additional: 3      # total extra lines that can trip over the episode
-  per_wave_max: 2        # cap trips per PF-success step
-  hop_limit: 2           # only trip neighbors within 2 graph hops of fault cluster
+  max_additional: 2       # total extra lines that can trip over the episode
+  per_wave_max: 1         # cap trips per PF-success step
+  hop_limit: 2            # only trip neighbors within 2 graph hops of fault cluster
   overload_min_pct: 115.0
   min_hold_steps: 2
   hysteresis_drop: 3.0
@@ -18,5 +17,5 @@ cascade:
     - [115.0, 0.15]
     - [125.0, 0.45]
     - [140.0, 0.85]
-  live_faults: false     # true -> new trips become live faults to isolate
-  neighbor_sample_k: 0   # 0 = consider all candidates
+  live_faults: false      # set true in curriculum phase 2
+  neighbor_sample_k: 0    # 0 = consider all candidates
