@@ -1,6 +1,23 @@
 #!/usr/bin/env python3
-import argparse
 import os
+import logging
+
+# CRITICAL: Disable Numba logging BEFORE any imports that might trigger it
+os.environ['NUMBA_DISABLE_JIT'] = '0'  # Keep JIT enabled
+os.environ['NUMBA_WARNINGS'] = '0'     # Disable warnings
+os.environ['NUMBA_DEBUG'] = '0'        # Disable debug
+os.environ['NUMBA_DEVELOPER_MODE'] = '0'
+
+# Set up logging before any imports
+logging.getLogger('numba').setLevel(logging.ERROR)
+logging.getLogger('numba.core').setLevel(logging.ERROR)
+logging.getLogger('numba.core.ssa').setLevel(logging.ERROR)
+logging.getLogger('numba.core.byteflow').setLevel(logging.ERROR)
+logging.getLogger('numba.core.interpreter').setLevel(logging.ERROR)
+logging.getLogger('numba.core.ssa').setLevel(logging.ERROR)
+logging.getLogger('pandapower').setLevel(logging.WARNING)
+
+import argparse
 from typing import Tuple, Dict, Any, Optional
 
 import torch.nn as nn
@@ -155,32 +172,39 @@ class CascadeDebugCallback(BaseCallback):
 
 # Top-level env factory for subproc safety
 def _env_ctor(env_id: str, env_cfg: dict, scenario: dict):
+    # Suppress numba in child processes too
+    import logging
+    logging.getLogger('numba').setLevel(logging.ERROR)
+    logging.getLogger('numba.core').setLevel(logging.ERROR)
     return make_env(env_id, env_cfg, scenario)
 
 # ------------------------- Main ------------------------ #
 def main():
     args = parse_args()
-    setup_logging("DEBUG")  # always DEBUG for cascade + PF trace
+    
+    setup_logging("INFO")
+    
+    if args.env_id in ["case33"]:
+        logging.getLogger("microgrid_safe_rl.envs").setLevel(logging.DEBUG)
+    
     set_global_seed(args.seed)
 
     agent_cfg = load_yaml(args.agent_cfg)
     env_cfg = load_yaml(args.env_cfg)
     scenario = load_yaml(args.scenario_cfg)
 
-    # Algo + kwargs
     algo_name, model_kwargs = _extract_algo_and_params(agent_cfg, args.algo)
     if algo_name not in ALGOS:
         raise SystemExit(f"Unsupported algo '{algo_name}'. Supported: {list(ALGOS)}")
     Model = ALGOS[algo_name]
 
-    # Info keys we want in Monitor (and TB via SB3)
     info_keys = (
         "served_total_frac", "served_crit_frac", "served_imp_frac",
         "fault_live", "isolation_happened", "powerflow_success",
         "cascade_remaining", "der_bound_frac", "served_mw", "der_bound_mw",
     )
 
-    # Vectorized env (multi-core ready)
+    # Vectorized env
     vec_cls = SubprocVecEnv if (args.vec_backend == "subproc" and args.n_envs > 1) else DummyVecEnv
     venv = make_vec_env(
         _env_ctor,
@@ -191,13 +215,34 @@ def main():
         monitor_kwargs={"info_keywords": info_keys},
     )
 
-    # Optional normalization
+    # CRITICAL FIX: VecNormalize warmup
     vecnorm: Optional[VecNormalize] = None
     if args.normalize:
-        vecnorm = VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0)
+        print("[train] Initializing VecNormalize with warmup...")
+        vecnorm = VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0, clip_reward=10.0)
+        
+        # Warmup: collect some samples to initialize running statistics
+        vecnorm.reset()
+        warmup_steps = 100
+        print(f"[train] Running {warmup_steps} warmup steps to initialize normalization stats...")
+        
+        for i in range(warmup_steps):
+            # CRITICAL: Must be numpy array, not list
+            actions = np.array([venv.action_space.sample() for _ in range(args.n_envs)])
+            obs, rewards, dones, infos = venv.step(actions)
+            
+            # Check for any issues during warmup
+            if i % 20 == 0:
+                if not np.all(np.isfinite(obs)):
+                    print(f"WARNING: Non-finite observations at warmup step {i}")
+                if not np.all(np.isfinite(rewards)):
+                    print(f"WARNING: Non-finite rewards at warmup step {i}: {rewards}")
+        
+        print(f"[train] Warmup complete. Obs mean: {vecnorm.obs_rms.mean[:5]}, std: {np.sqrt(vecnorm.obs_rms.var[:5])}")
+        vecnorm.reset()
         venv = vecnorm
 
-    # Model: warm start or fresh
+    # Model creation
     tb_dir = args.tb_logdir or None
     if args.init_model:
         print(f"[train] Loading init model from: {args.init_model}")
@@ -206,6 +251,7 @@ def main():
     else:
         policy = model_kwargs.pop("policy", "MlpPolicy")
         model = Model(policy, venv, verbose=1, tensorboard_log=tb_dir, **model_kwargs)
+
 
     # Logger
     if tb_dir:

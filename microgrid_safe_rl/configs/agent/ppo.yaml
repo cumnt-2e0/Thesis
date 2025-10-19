@@ -1,15 +1,20 @@
 algo: ppo
 ppo:
   policy: MlpPolicy
-  learning_rate: 3.0e-4
   gamma: 0.995
-  n_steps: 256        # per-env → total rollout = n_steps * n_envs = 256*8=2048
-  batch_size: 2048    # must divide total rollout
-  n_epochs: 10
   gae_lambda: 0.95
+  n_steps: 4096            # per env; raise/lower with GPU/CPU RAM
+  batch_size: 1024
+  n_epochs: 10
+  learning_rate: 3.0e-4
+  clip_range: 0.2
   ent_coef: 0.0
   vf_coef: 0.5
   max_grad_norm: 0.5
+  normalize_advantage: true
+  use_sde: false
   policy_kwargs:
-    net_arch: [256, 256]
     activation_fn: relu
+    net_arch:
+      pi:  [256, 256]
+      vf:  [256, 256]

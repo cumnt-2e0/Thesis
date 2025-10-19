@@ -1,0 +1,44 @@
+env_id: case33
+
+# No cascades for case33 - radial topology doesn't support them well
+cascade:
+  enabled: false
+
+# DER unavailability - creates resource scarcity
+der_unavailability:
+  enabled: true
+  p_deficit_frac: [0.2, 0.4]  # 20-40% generation deficit
+  random_outage_prob: 0.1
+  max_disabled: 1
+  scaling_range: [0.5, 0.8]
+
+# Disable stress for cleaner testing
+stress:
+  global:
+    load_scale_p: 1.0  
+    line_rating_scale: 1.0
+  local_on_fault:
+    enabled: false  
+
+# Single line faults via seed mechanism
+cascade:
+  enabled: true  # Just for seed faults
+  seed:
+    n_seeds: 1
+    step_window_frac: [0.2, 0.4]
+    exclude_bridges: true
+  # But disable actual cascading
+  overload_min_pct: 999.0  # Impossible threshold
+  max_additional: 0
+
+# Action space
+enable_setpoint_shedding: true
+shed_step: 0.1
+
+# Reward weights
+reward_weights:
+  tier1: 8.0
+  tier2: 3.0
+  tier3: 1.0
+  bound_violation: -20.0
+  pf_failure: -30.0

@@ -1,0 +1,21 @@
+enabled: true
+modes: ["line", "load"]
+severity: 0.8
+
+cascade:
+  strategy: overload
+  max_additional: 3
+  per_wave_max: 2
+  hop_limit: 2
+  overload_min_pct: 115.0
+  min_hold_steps: 2
+  hysteresis_drop: 3.0
+  prob_loading_map:
+    - [115.0, 0.15]
+    - [125.0, 0.45]
+    - [140.0, 0.85]
+  live_faults: false     # cascade trips are hard outages (no isolation task)
+  neighbor_sample_k: 0
+  
+# Turn DER unavailability ON in this phase
+der: true

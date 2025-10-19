@@ -1,0 +1,130 @@
+# ========= Core =========
+voltage_limits: [0.95, 1.05]
+max_steps: 60
+pf_failure_patience: 3
+step_seconds: 5.0
+
+# Loads / shedding
+enable_setpoint_shedding: true
+shed_step: 0.10
+
+# Observation realism
+observation:
+  telemetry_latency_steps: 0
+  include_async_masks: false
+  add_measurement_noise: false
+  noise_std:
+    voltage_pu: 0.002
+    loading_pct: 0.01
+
+# Safety (physics only)
+safety:
+  max_closed_ties: 1
+  voltage_margin_pu: 0.01
+  loading_margin_pct: 5.0
+  per_step_switch_budget: 1
+  min_dwell_steps: 0
+
+# Reward
+reward_weights:
+  tier1: 8.0
+  tier2: 3.0
+  tier3: 1.0
+  volt_violation: -2.0
+  thermal_violation: -1.0
+  switch_cost: -0.02
+  restore_tier1_delta: 5.0
+  pf_failure: -30.0
+  bound_violation: -20.0  # NEW: DER bound penalty
+
+# Agent control permissions
+controls:
+  allow_generation_control: false
+  allow_storage_control: false
+
+# ========= Cascading faults engine (AGGRESSIVE) =========
+cascade:
+  enabled: true
+
+  # Candidate neighborhood
+  hop_limit: 3
+  neighbor_sample_k: 0          # 0 = no subsample
+
+  # Overload gate (LOWER thresholds)
+  overload_min_pct: 105.0       # Was 110 → 105 (easier to trigger)
+  min_hold_steps: 1             # Immediate trigger
+  hysteresis_drop: 2.0          # Faster decay
+
+  # Rate/limits of trips
+  per_wave_max: 2               # Was 1 → 2 (more trips per step)
+  max_additional: 6             # Was 4 → 6 (more total cascade trips)
+  min_gap_steps: 0              # No breathing room (was 1)
+  exclude_bridges: true
+
+  # Hazard shaping (MORE AGGRESSIVE)
+  lambda0: 0.20                 # Was 0.10 → 0.20 (2x base hazard)
+  rho0: 0.85                    # Was 0.92 → 0.85 (lower baseline, easier trigger)
+  alpha: 2.5                    # Was 2.0 → 2.5 (steeper loading curve)
+  betaV: 1.5                    # Was 1.0 → 1.5 (voltage matters more)
+  zone_boost: 1.6               # Was 1.4 → 1.6 (corridor boost)
+  d0: 2.5                       # Was 3.0 → 2.5 (tighter proximity)
+
+  # Probability multipliers (MORE AGGRESSIVE)
+  prob_loading_map:
+    - [100, 0.05]               # Even at 100% there's some risk
+    - [105, 0.20]               # Was 110/0.30
+    - [110, 0.50]               # Was 120/0.60
+    - [115, 0.75]               # Was 130/0.90
+    - [120, 0.95]               # Nearly certain at 120%
+
+  # Random seed trip
+  seed:
+    n_seeds: 1
+    step_window_frac: [0.08, 0.20]
+    exclude_bridges: true
+
+# ========= Stress model (EXTREME) =========
+stress:
+  # NO global stress - keep reset stable
+  global:
+    load_scale_p: 1.00
+    load_scale_q: 1.00
+    line_rating_scale: 1.00
+    gen_cap_scale: 1.00
+
+  # EXTREME local stress after trips
+  local_on_fault:
+    enabled: true
+    hops: 3                      # Wide neighborhood
+    p_scale: 2.5                 # Was 1.40 → 2.5x (extreme spike)
+    q_scale: 2.0                 # Was 1.20 → 2.0x
+    line_rating_scale: 0.60      # Was 0.90 → 0.6x (harsh derating)
+    duration_steps: 12           # Persist longer (was 10)
+
+    # Aggressive ratcheting
+    on_every_trip: true
+    accumulate: true
+    ensure_gate: true            # CRITICAL: force gate crossing
+    gate_margin_pct: 5.0         # Was 2.0 → 5.0 (aim higher)
+    max_p_scale: 4.0             # Was 2.5 → 4.0 (allow extreme loads)
+    min_line_scale: 0.25         # Was 0.35 → 0.25 (allow severe derating)
+
+# ========= DER Unavailability (NEW) =========
+der_unavailability:
+  enabled: false                  # Turn on DER constraints
+  p_deficit_frac: [0.15, 0.35]   # 15-35% generation deficit
+  scaling_range: [0.4, 0.9]      # Scale remaining DER to 40-90%
+  random_outage_prob: 0.3        # 30% chance of outage per DER
+  max_der_size_mw: 50.0          # Only trip DER ≤ 50 MW
+  max_disabled: 2                # At most 2 DER outages
+
+# Case145 augmentation
+case145_aug:
+  tier_percent_critical: 0.10
+  tier_percent_important: 0.20
+  pf_sanity_check: true
+  log_tier_summary: true
+
+# Inline scenario (empty; seeds supply trips)
+events: []
+repairs: []

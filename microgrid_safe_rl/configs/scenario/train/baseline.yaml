@@ -1,0 +1,4 @@
+# Empty scenario: no scripted events. Random cascades come from env.yaml.
+name: baseline_empty
+events: []
+repairs: []

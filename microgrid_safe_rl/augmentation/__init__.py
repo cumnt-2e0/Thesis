@@ -1,2 +1,4 @@
-from .common import augment_full, assign_priorities
-__all__=['augment_full','assign_priorities']
+# Always expose the case145 augment + priorities.
+from .case145 import augment_case145, assign_priorities
+
+__all__ = ["augment_case145", "assign_priorities"]

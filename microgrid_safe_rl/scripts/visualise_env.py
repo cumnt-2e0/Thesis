@@ -8,7 +8,7 @@ import networkx as nx
 import pandapower.networks as pn
 
 from microgrid_safe_rl.feeders.registry import get_feeder
-from microgrid_safe_rl.augmentation.common import assign_priorities
+from microgrid_safe_rl.augmentation.case145 import assign_priorities
 
 
 def _build_graph(net):

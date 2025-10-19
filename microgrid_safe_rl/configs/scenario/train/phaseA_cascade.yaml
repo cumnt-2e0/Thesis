@@ -1,0 +1,35 @@
+name: phaseA_cascade_s5
+enabled: true
+
+# we primarily inject LINE faults and allow cascades to extend them
+modes: ["line"]
+severity: 0.8
+
+# keep bridges out to avoid trivial network splits (can relax later)
+exclude_bridges: true
+exclude_bridges_prob: 1.0
+
+# ===== Cascade engine =====
+cascade:
+  strategy: overload          # watch overloads; trip probabilistically
+  max_additional: 4           # up to 4 extra line trips beyond primary
+  per_wave_max: 1             # at most 1 new trip per step
+  hop_limit: 2                # neighbors within 2 hops of fault cluster
+  overload_min_pct: 118.0     # threshold to start counting hold
+  min_hold_steps: 2
+  hysteresis_drop: 3.0
+  prob_loading_map:
+    - [115.0, 0.10]
+    - [125.0, 0.40]
+    - [140.0, 0.85]
+  live_faults: true           # new trips appear as live faults (breaker trip)
+  neighbor_sample_k: 0        # 0 = consider all candidates
+
+# optional scripted timeline (leave empty to rely on stochastic cascade)
+events: []
+repairs: []
+
+# noise knobs (kept off for Phase A)
+der: false
+noise:
+  load_sigma_pct: 0.0
