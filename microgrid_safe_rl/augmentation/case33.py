@@ -1,5 +1,6 @@
 # microgrid_safe_rl/augmentation/case33.py
 # CRITICAL FIXES for case33bw training
+# ADDED tie switches for restoration
 
 from __future__ import annotations
 import logging
@@ -25,7 +26,8 @@ def augment_case33(
     vm_pu_slack: float = 1.00,
     line_rating_mva: float = 5.0,
     run_pf_after: bool = True,
-    add_switches: bool = True,  # NEW: Add controllable switches
+    add_switches: bool = True,
+    add_tie_switches: bool = True, # NEW: Flag to add tie switches
 ) -> Tuple[pp.pandapowerNet, Dict[str, Any]]:
     """
     Prepare IEEE 33-bus (case33bw) for RL training.
@@ -40,10 +42,14 @@ def augment_case33(
     
     _normalise_load_units_if_needed(net)
     
-    # CRITICAL: Add controllable switches BEFORE other operations
+    # Add controllable sectionalizing switches
     if add_switches:
         _add_controllable_switches(net)
     
+    # NEW: Add controllable tie switches
+    if add_tie_switches:
+        _add_tie_switches_case33(net, default_rating_ka=line_rating_mva / (np.sqrt(3) * 12.66))
+
     _prepare_switches_case33(net, force_radial=force_radial)
     _force_lines_in_service(net)
     _fix_degenerate_line_params(net)
@@ -72,12 +78,20 @@ def augment_case33(
         LOG.error("CRITICAL: No slack source after augmentation!")
         _ensure_internal_slack(net, vm_pu_slack=vm_pu_slack)
     
+    # Update meta to include tie switches
+    n_switches = int(len(net.switch)) if hasattr(net, "switch") else 0
+    n_tie_switches = 0
+    if hasattr(net, "switch") and 'is_tie' in net.switch.columns:
+        n_tie_switches = int(net.switch['is_tie'].sum())
+    
     meta = {
         "buses": int(len(net.bus)) if hasattr(net, "bus") else 0,
         "loads": int(len(net.load)) if hasattr(net, "load") else 0,
         "total_load_mw": float(net.load.p_mw.sum()) if len(net.load) else 0.0,
         "num_lines": int(len(net.line)) if hasattr(net, "line") else 0,
-        "num_switches": int(len(net.switch)) if hasattr(net, "switch") else 0,
+        "num_switches": n_switches,
+        "num_sectionalizing": n_switches - n_tie_switches, # NEW
+        "num_ties": n_tie_switches, # NEW
         "num_pv": int(len(net.sgen)) if hasattr(net, "sgen") else 0,
         "num_storage": int(len(net.storage)) if hasattr(net, "storage") else 0,
         "islanded": not keep_slack,
@@ -94,7 +108,6 @@ def augment_case33(
     return net, meta
 
 
-# NEW FUNCTION: Add controllable switches for agent
 def _add_controllable_switches(net: pp.pandapowerNet) -> None:
     """
     Add controllable line switches to enable reconfiguration.
@@ -104,46 +117,102 @@ def _add_controllable_switches(net: pp.pandapowerNet) -> None:
         LOG.warning("No lines to add switches to")
         return
     
-    # Identify strategic lines for switching
-    # 1. Mid-feeder lines (around 1/3 and 2/3 points)
-    # 2. Branch points (lines with multiple downstream loads)
-    
     n_lines = len(net.line)
-    strategic_lines = []
+    # Lines in case33bw are indexed 0-36. 5 are already switches (32-36).
+    # We add switches to non-switch lines.
     
-    # Add switches at roughly 25%, 50%, 75% positions
-    strategic_lines.extend([
-        int(n_lines * 0.25),
-        int(n_lines * 0.50),
-        int(n_lines * 0.75),
-    ])
-    
-    # Add a few more at key branch points
-    if n_lines > 20:
-        strategic_lines.extend([5, 10, 15, 20, 25])
+    # Strategic lines for sectionalizing (avoiding existing switches)
+    strategic_lines = [
+        2, 5, 8, 12, 15, 19, 23, 28, 30
+    ]
     
     # Deduplicate and ensure valid
     strategic_lines = list(set([i for i in strategic_lines if 0 <= i < n_lines]))
     
-    LOG.info(f"Adding {len(strategic_lines)} controllable switches on lines: {strategic_lines}")
+    LOG.info(f"Adding {len(strategic_lines)} controllable sectionalizing switches on lines: {strategic_lines}")
     
+    if 'is_tie' not in net.switch.columns:
+        net.switch['is_tie'] = False
+    if 'is_controllable' not in net.switch.columns:
+        net.switch['is_controllable'] = False
+
     for line_idx in strategic_lines:
         if line_idx not in net.line.index:
             continue
         
         # Add normally-closed switch on this line
-        pp.create_switch(
+        sw_idx = pp.create_switch(
             net,
             bus=int(net.line.at[line_idx, "from_bus"]),
             element=int(line_idx),
             et="l",  # line switch
             closed=True,  # Start closed
             type="LBS",  # Load break switch
-            name=f"SW_L{line_idx}"
+            name=f"SW_SEC_L{line_idx}"
         )
+        net.switch.at[sw_idx, 'is_controllable'] = True
+        net.switch.at[sw_idx, 'is_tie'] = False
     
-    LOG.info(f"Added {len(strategic_lines)} controllable switches")
+    LOG.info(f"Added {len(strategic_lines)} controllable sectionalizing switches")
 
+
+# NEW FUNCTION to add tie switches
+def _add_tie_switches_case33(net: pp.pandapowerNet, default_rating_ka: float = 0.4) -> None:
+    """Add strategic normally-open tie switches for case33."""
+    
+    # Strategic pairs to create loops for restoration
+    # (bus1, bus2)
+    tie_pairs = [
+        (11, 21),  # Connects branch (8-11) to branch (18-21)
+        (17, 32),  # Connects end of main feeder to end of (25-32) branch
+        (24, 8),   # Connects end of (22-24) branch back to (2-8) branch
+    ]
+    
+    LOG.info(f"Adding {len(tie_pairs)} controllable tie switches...")
+
+    if 'is_tie' not in net.line.columns:
+        net.line['is_tie'] = False
+    if 'is_tie' not in net.switch.columns:
+        net.switch['is_tie'] = False
+    if 'is_controllable' not in net.switch.columns:
+        net.switch['is_controllable'] = False
+
+    net['tie_switches'] = []
+    net['tie_lines'] = []
+
+    for bus1, bus2 in tie_pairs:
+        # Create a new line for the tie
+        tie_line_idx = pp.create_line_from_parameters(
+            net,
+            from_bus=bus1,
+            to_bus=bus2,
+            length_km=0.1,  # Short tie line
+            r_ohm_per_km=0.0922,
+            x_ohm_per_km=0.0470,
+            c_nf_per_km=0,
+            max_i_ka=default_rating_ka,
+            name=f"TIE_{bus1}_{bus2}",
+            in_service=False  # Tie lines are 'in_service' but their switches are open
+        )
+        net.line.at[tie_line_idx, 'is_tie'] = True
+        net['tie_lines'].append(tie_line_idx)
+        
+        # Create the normally-open switch for the tie line
+        tie_sw_idx = pp.create_switch(
+            net,
+            bus=bus1,
+            element=tie_line_idx,
+            et='l',
+            closed=False,  # Normally OPEN
+            type='CB',  # Controllable Breaker
+            name=f"TIE_SW_{bus1}_{bus2}"
+        )
+        
+        net.switch.at[tie_sw_idx, 'is_controllable'] = True
+        net.switch.at[tie_sw_idx, 'is_tie'] = True
+        net['tie_switches'].append(tie_sw_idx)
+        
+        LOG.info(f"  ✓ Added tie switch {tie_sw_idx} (line {tie_line_idx}) between bus {bus1} and {bus2}")
 
 # ------------------------------ Rest of functions unchanged ---------------------------------- #
 
@@ -184,7 +253,7 @@ def _ensure_internal_slack(net: pp.pandapowerNet, vm_pu_slack: float = 1.0) -> N
     # Create a new slack gen
     bus_idx = _pick_internal_slack_bus(net)
     total_load = float(net.load["p_mw"].sum()) if len(net.load) else 10.0
-    gen_size = total_load * 1.2
+    gen_size = total_load * 1.5 # Make it 1.5x total load
     
     pp.create_gen(
         net,
@@ -192,14 +261,14 @@ def _ensure_internal_slack(net: pp.pandapowerNet, vm_pu_slack: float = 1.0) -> N
         p_mw=0.0,
         vm_pu=float(vm_pu_slack),
         slack=True,
-        min_p_mw=-gen_size,
+        min_p_mw=0.0, # FIX: Min power is 0
         max_p_mw=gen_size,
         controllable=True,
         name="internal_slack_gen",
         in_service=True
     )
     
-    LOG.info(f"Created internal slack gen at bus {bus_idx} with capacity ±{gen_size:.1f} MW, in_service=True")
+    LOG.info(f"Created internal slack gen at bus {bus_idx} with capacity {gen_size:.1f} MW, in_service=True")
 
 
 def _normalise_load_units_if_needed(net: pp.pandapowerNet) -> None:
@@ -217,7 +286,7 @@ def _normalise_load_units_if_needed(net: pp.pandapowerNet) -> None:
 def _prepare_switches_case33(net: pp.pandapowerNet, *, force_radial: bool) -> None:
     """Close line-end switches and open bus-bus ties if present."""
     if not hasattr(net, "switch") or len(net.switch) == 0:
-        LOG.info("No switches initially in case33bw")
+        LOG.info("No switches to prepare")
         return
 
     sw = net.switch
@@ -225,28 +294,41 @@ def _prepare_switches_case33(net: pp.pandapowerNet, *, force_radial: bool) -> No
         LOG.warning("Switch table missing 'et'; not forcing tie behaviour.")
         return
 
-    line_sw_mask = (sw["et"] == "l")
-    busbus_mask = (sw["et"] == "b")
-
-    # Close all line switches by default
+    # Identify switches based on our new 'is_tie' column
+    tie_sw_mask = sw.get('is_tie', False).fillna(False).astype(bool)
+    line_sw_mask = ~tie_sw_mask
+    
+    # Close all sectionalizing (non-tie) line switches
     n_line_to_close = int((~sw.loc[line_sw_mask, "closed"]).sum())
     if n_line_to_close > 0:
-        LOG.info(f"Closing {n_line_to_close} line-end switches")
+        LOG.info(f"Closing {n_line_to_close} sectionalizing line switches")
         sw.loc[line_sw_mask, "closed"] = True
 
     if force_radial:
-        n_busbus_to_open = int(sw.loc[busbus_mask, "closed"].sum())
-        if n_busbus_to_open > 0:
-            LOG.info(f"Opening {n_busbus_to_open} bus-bus ties (radial base)")
-            sw.loc[busbus_mask, "closed"] = False
+        # Open all tie switches
+        n_ties_to_open = int(sw.loc[tie_sw_mask, "closed"].sum())
+        if n_ties_to_open > 0:
+            LOG.info(f"Opening {n_ties_to_open} tie switches to force radial base")
+            sw.loc[tie_sw_mask, "closed"] = False
 
 
 def _force_lines_in_service(net: pp.pandapowerNet) -> None:
     if hasattr(net, "line") and "in_service" in net.line.columns:
-        n_off = int((~net.line.in_service).sum())
-        if n_off:
-            LOG.warning(f"Forcing {n_off} lines in_service=True for baseline PF visibility")
-            net.line.loc[:, "in_service"] = True
+        # Don't force TIE lines to be in_service, as their switch controls this
+        # case33.py
+        if 'is_tie' in net.line.columns:
+            # FIX: Ensure mask is boolean by filling NaNs
+            mask = ~net.line['is_tie'].fillna(False).astype(bool)
+            n_off = int((~net.line.loc[mask, "in_service"]).sum())
+            if n_off > 0:
+                LOG.warning(f"Forcing {n_off} regular lines in_service=True")
+                net.line.loc[mask, "in_service"] = True
+        else:
+             # Fallback if 'is_tie' doesn't exist
+            n_off = int((~net.line.in_service).sum())
+            if n_off:
+                LOG.warning(f"Forcing {n_off} lines in_service=True for baseline PF visibility")
+                net.line.loc[:, "in_service"] = True
 
 
 def _fix_degenerate_line_params(net: pp.pandapowerNet) -> None:

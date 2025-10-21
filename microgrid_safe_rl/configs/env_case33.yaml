@@ -23,7 +23,7 @@ reward_weights:
   tier2: 5.0               # Important loads (commercial, municipal)
   tier3: 1.5               # Normal loads (residential)
   
-  restore_tier1_delta: 0.0
+  restore_tier1_delta: 12.0
 
   # Violations (negative)
   volt_violation: -3.0     # Voltage out of bounds
@@ -52,6 +52,8 @@ safety:
 controls:
   allow_generation_control: false   # Agent CANNOT change generator setpoints
   allow_storage_control: false      # Agent CANNOT control battery directly
+  allow_switching: true            # Agent CAN open/close switches
+  allow_tie_closure: true
 
 # Load shedding capability
 enable_setpoint_shedding: true      # Agent CAN shed loads
@@ -74,32 +76,29 @@ observation:
 
 # CASCADE ENGINE - DISABLED FOR TRAINING
 cascade:
-  enabled: false                    # NO cascading faults during training
-  
-  # Seed faults (scripted line trips)
+  enabled: true                  # Keep true
+
+  # A) Initial Seed Faults (Keep enabled)
   seed:
-    n_seeds: 1                      # One line fault per episode
-    step_window_frac: [0.15, 0.35]  # Fault occurs 15-35% into episode
-    exclude_bridges: true           # Don't trip critical bridge lines
-  
-  # All cascade parameters ignored when enabled=false
-  hop_limit: 2
-  neighbor_sample_k: 0
-  overload_min_pct: 130.0
-  min_hold_steps: 3
-  hysteresis_drop: 5.0
-  lambda0: 0.0                      # Zero cascade probability
-  rho0: 0.95
-  alpha: 2.0
-  betaV: 1.0
-  zone_boost: 1.0
-  d0: 3.0
-  per_wave_max: 0
-  max_additional: 0
-  min_gap_steps: 5
-  exclude_bridges: true
-  prob_loading_map:
-    - [130.0, 0.0]
+    n_seeds: 1                   # Keep 1 initial random fault
+    step_window_frac: [0.05, 0.35]
+
+  # B) Cascading Faults (NOW WEAKLY ENABLED)
+  lambda0: 0.1                 # CRITICAL: Very small base rate for cascades
+  rho0: 0.90                     # Overload threshold factor start
+  alpha: 2.0                     # Overload exponent
+  overload_min_pct: 100.0        # Line must be >110% loaded
+  min_hold_steps: 1              # Must sustain overload for at least 1 step
+  max_additional: 2              # CRITICAL: Allow max 2 *extra* trips after seed
+  # Other cascade params (less critical for just weakening)
+  betaV: 1.0                     # Voltage penalty factor
+  zone_boost: 1.4                # Probability boost for lines near existing faults
+  d0: 3.0                        # Proximity distance scale
+  per_wave_max: 1                # Max trips per *single* step check
+  min_gap_steps: 1               # Min steps between cascade checks
+  exclude_bridges: true          # Avoid tripping critical bridge lines if possible
+  prob_loading_map: 
+    - [115.0, 1.2] # Scale up probability above 115%
 
 # ============================================================================
 # STRESS CONDITIONS - System degradation
@@ -115,8 +114,8 @@ stress:
   
   # Local stress around faults - DISABLED
   local_on_fault:
-    enabled: false
-    hops: 2
+    enabled: true
+    hops: 1
     duration_steps: 10
     p_scale: 1.3
     q_scale: 1.0

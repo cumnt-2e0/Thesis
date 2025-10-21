@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Dedicated training script for case33 microgrid environment.
-Focus: Line faults + DER degradation (NO cascades).
-Agent learns: Switching for fault isolation + Load shedding under generation deficit.
+Dedicated HOT-START training script for case33 microgrid environment.
+Focus: Fine-tune a pre-trained model to handle:
+    1. Line faults (new task)
+    2. DER degradation (existing task)
 """
 
 import os
@@ -41,23 +42,30 @@ from microgrid_safe_rl.envs.factory import make_env
 def parse_args():
     p = argparse.ArgumentParser(description="Train RL agent on case33 microgrid")
     
-    # Training parameters
-    p.add_argument("--total_timesteps", type=int, default= 1_000_000,
-                   help="Total training timesteps (default: 1M)")
+    # --- HOT-START: These arguments are CRITICAL ---
+    p.add_argument("--init_model", type=str, required=True,
+                   help="Path to a .zip model to continue training from")
+    p.add_argument("--init_vecnorm", type=str, required=True,
+                   help="Path to a .pkl VecNormalize stat file to load")
+    
+    # --- NEW DEFAULTS FOR FINE-TUNING ---
+    p.add_argument("--total_timesteps", type=int, default= 500_000,
+                   help="Total training timesteps (default: 500k for fine-tuning)")
+    p.add_argument("--run_name", type=str, default="case33_hotstart_faults_3",
+                   help="Run name for artifacts (default: case33_hotstart_faults_3)")
+    p.add_argument("--env_cfg", type=str,
+                   default="microgrid_safe_rl/configs/env_case33.yaml",
+                   help="Environment config (default: env_case33.yaml)")
+    
+    # --- Standard args from original script ---
     p.add_argument("--seed", type=int, default=42,
                    help="Random seed")
-    p.add_argument("--run_name", type=str, default=None,
-                   help="Run name for artifacts (default: auto-generated)")
-    
-    # Parallelization
     p.add_argument("--n_envs", type=int, default=8,
                    help="Number of parallel environments")
     p.add_argument("--vec_backend", choices=["dummy", "subproc"], default="subproc",
                    help="Vectorization backend")
-    
-    # Features
-    p.add_argument("--normalize", action="store_true",
-                   help="Enable VecNormalize (observation + reward normalization)")
+    p.add_argument("--normalize", action="store_true", default=True,
+                   help="Enable VecNormalize (DEFAULT: True, required for hot-start)")
     p.add_argument("--progress", action="store_true",
                    help="Show training progress bar")
     
@@ -69,11 +77,9 @@ def parse_args():
     p.add_argument("--eval_episodes", type=int, default=5,
                    help="Number of evaluation episodes")
     
-    # Config overrides (defaults to standard case33 configs)
+    # Config overrides
     p.add_argument("--agent_cfg", type=str, 
                    default="microgrid_safe_rl/configs/agent/ppo.yaml")
-    p.add_argument("--env_cfg", type=str,
-                   default="microgrid_safe_rl/configs/env_case33.yaml")
     p.add_argument("--scenario_cfg", type=str,
                    default="microgrid_safe_rl/configs/scenario/train/baseline.yaml")
     
@@ -81,7 +87,7 @@ def parse_args():
 
 
 # ============================================================================
-# Callbacks
+# Callbacks (Identical to train_case33.py)
 # ============================================================================
 
 class Case33MetricsCallback(BaseCallback):
@@ -95,24 +101,19 @@ class Case33MetricsCallback(BaseCallback):
         if self.num_timesteps % self.log_freq != 0:
             return True
         
-        # Get info from first env
         infos = self.locals.get("infos", [])
         if not infos:
             return True
         
         info = infos[0]
         
-        # Service metrics (MOST IMPORTANT)
         self.logger.record("metrics/served_total", info.get("served_total_frac", 0.0))
         self.logger.record("metrics/served_critical", info.get("served_crit_frac", 0.0))
         self.logger.record("metrics/served_important", info.get("served_imp_frac", 0.0))
-        
-        # System health
         self.logger.record("metrics/pf_success", int(info.get("powerflow_success", False)))
         self.logger.record("metrics/live_lines", info.get("live_lines", 0))
         self.logger.record("metrics/energized_buses", info.get("energized_buses", 0))
         
-        # Reward components
         rc = info.get("reward_components", {})
         for key in ("service_t1", "service_t2", "service_t3", 
                    "volt_violation", "thermal_violation", "switch_ops",
@@ -124,12 +125,11 @@ class Case33MetricsCallback(BaseCallback):
 
 
 # ============================================================================
-# Environment factory
+# Environment factory (Identical to train_case33.py)
 # ============================================================================
 
 def make_case33_env(env_cfg: dict, scenario: dict):
     """Create case33 environment (called in subprocesses)."""
-    # Suppress logging in child processes
     import logging
     logging.getLogger('numba').setLevel(logging.ERROR)
     logging.getLogger('pandapower').setLevel(logging.WARNING)
@@ -138,36 +138,28 @@ def make_case33_env(env_cfg: dict, scenario: dict):
 
 
 # ============================================================================
-# Main training loop
+# Main training loop (Modified for Hot-Start)
 # ============================================================================
 
 def main():
     args = parse_args()
     
-    # Setup
     setup_logging("INFO")
     set_global_seed(args.seed)
     
-    # Generate run name
-    if args.run_name is None:
-        from datetime import datetime
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        args.run_name = f"case33_{timestamp}"
-    
-    # Paths
     save_dir = Path("artifacts/models") / args.run_name
     tb_dir = Path("artifacts/runs") / args.run_name
     save_dir.mkdir(parents=True, exist_ok=True)
     tb_dir.mkdir(parents=True, exist_ok=True)
     
     print("=" * 80)
-    print("Training Case33 Microgrid RL Agent")
+    print("HOT-START Training Case33 Microgrid RL Agent (with Faults)")
     print("=" * 80)
     print(f"Run name:        {args.run_name}")
+    print(f"Loading model:   {args.init_model}")
+    print(f"Loading vecnorm: {args.init_vecnorm}")
     print(f"Total timesteps: {args.total_timesteps:,}")
-    print(f"Parallel envs:   {args.n_envs}")
-    print(f"Seed:            {args.seed}")
-    print(f"Normalize:       {args.normalize}")
+    print(f"Env Config:      {args.env_cfg}")
     print(f"Models:          {save_dir}")
     print(f"TensorBoard:     {tb_dir}")
     print("=" * 80)
@@ -178,11 +170,9 @@ def main():
     env_cfg = load_yaml(args.env_cfg)
     scenario = load_yaml(args.scenario_cfg)
     
-    # Extract PPO parameters
     ppo_params = agent_cfg.get("ppo", {})
     policy = ppo_params.get("policy", "MlpPolicy")
     
-    # Policy kwargs with activation function
     policy_kwargs = ppo_params.get("policy_kwargs", {})
     if "activation_fn" in policy_kwargs:
         act_str = policy_kwargs["activation_fn"].lower()
@@ -192,7 +182,6 @@ def main():
         }
         policy_kwargs["activation_fn"] = activation_map.get(act_str, nn.Tanh)
     
-    # Info keys for Monitor (ONLY keys that exist in case33)
     info_keys = ("served_total_frac", "served_crit_frac", "served_imp_frac", "powerflow_success")
     
     # Create vectorized training environment
@@ -208,26 +197,23 @@ def main():
         monitor_kwargs={"info_keywords": info_keys},
     )
     
-    # Optional: VecNormalize
-    if args.normalize:
-        print("Initializing VecNormalize with warmup...")
-        train_env = VecNormalize(
-            train_env,
-            norm_obs=True,
-            norm_reward=True,
-            clip_obs=10.0,
-            clip_reward=10.0,
-        )
-        
-        # Warmup to initialize statistics
-        train_env.reset()
-        for i in range(100):
-            actions = np.array([train_env.action_space.sample() for _ in range(args.n_envs)])
-            train_env.step(actions)
-        
-        print(f"Warmup complete. Obs stats initialized.")
-        train_env.reset()
+    # --- VECNORMALIZE LOADING ---
+    # We assume normalization was used in the first run, as it's critical
+    if not args.normalize:
+        print("WARNING: --normalize flag is OFF, but hot-starting typically")
+        print("         requires loading old VecNormalize stats.")
+        print("         If the original model used VecNormalize, this WILL FAIL.")
     
+    if args.init_vecnorm:
+        print(f"Loading VecNormalize stats from: {args.init_vecnorm}")
+        train_env = VecNormalize.load(args.init_vecnorm, train_env)
+        train_env.training = True  # IMPORTANT: Set to training mode
+        print("✓ VecNormalize stats loaded.")
+    else:
+        print("ERROR: --init_vecnorm path is required for hot-starting.")
+        print("       Please provide the .pkl file from the previous run.")
+        return
+
     print(f"✓ Created {args.n_envs} training environments")
     
     # Create evaluation environment (single env, deterministic)
@@ -241,50 +227,40 @@ def main():
         monitor_kwargs={"info_keywords": info_keys},
     )
     
-    if args.normalize:
-        eval_env = VecNormalize(
-            eval_env,
-            norm_obs=True,
-            norm_reward=True,
-            training=False,  # Don't update stats during eval
-        )
-        # Copy normalization stats from training env
-        eval_env.obs_rms = train_env.obs_rms
-        eval_env.ret_rms = train_env.ret_rms
+    eval_env = VecNormalize(
+        eval_env,
+        norm_obs=True,
+        norm_reward=True,
+        training=False,  # Don't update stats during eval
+    )
+    # Copy normalization stats from training env
+    eval_env.obs_rms = train_env.obs_rms
+    eval_env.ret_rms = train_env.ret_rms
     
     print("✓ Created evaluation environment")
     print()
     
-    # Create PPO model
-    print("Creating PPO model...")
-    model = PPO(
-        policy=policy,
-        env=train_env,
-        learning_rate=ppo_params.get("learning_rate", 3e-4),
-        n_steps=ppo_params.get("n_steps", 2048),
-        batch_size=ppo_params.get("batch_size", 64),
-        n_epochs=ppo_params.get("n_epochs", 10),
-        gamma=ppo_params.get("gamma", 0.99),
-        gae_lambda=ppo_params.get("gae_lambda", 0.95),
-        clip_range=ppo_params.get("clip_range", 0.2),
-        ent_coef=ppo_params.get("ent_coef", 0.01),
-        vf_coef=ppo_params.get("vf_coef", 0.5),
-        max_grad_norm=ppo_params.get("max_grad_norm", 0.5),
-        policy_kwargs=policy_kwargs,
-        verbose=1,
+    # --- MODEL LOADING ---
+    if not args.init_model:
+        print("ERROR: --init_model path is required for hot-starting.")
+        return
+
+    print(f"Loading and continuing from: {args.init_model}")
+    model = PPO.load(
+        args.init_model,
+        env=train_env,  # Pass the (wrapped) env
         tensorboard_log=str(tb_dir),
-        device="auto",
+        policy_kwargs=policy_kwargs, # Re-apply policy kwargs
+        # You can optionally reduce the learning rate for fine-tuning
+        # learning_rate=1e-5, 
     )
-    
-    # Setup logger
     model.set_logger(configure(str(tb_dir), ["stdout", "tensorboard"]))
-    print("✓ PPO model created")
-    print()
+    print("✓ Model loaded.")
+    
     
     # Setup callbacks
     callbacks = []
     
-    # Checkpoint callback
     ckpt_dir = save_dir / "checkpoints"
     ckpt_dir.mkdir(exist_ok=True)
     if args.checkpoint_freq > 0:
@@ -295,7 +271,6 @@ def main():
         )
         callbacks.append(EveryNTimesteps(n_steps=args.checkpoint_freq, callback=ckpt_cb))
     
-    # Evaluation callback
     if args.eval_freq > 0:
         eval_cb = EvalCallback(
             eval_env,
@@ -308,14 +283,13 @@ def main():
         )
         callbacks.append(EveryNTimesteps(n_steps=args.eval_freq, callback=eval_cb))
     
-    # Metrics callback
     callbacks.append(Case33MetricsCallback(log_freq=1000))
     
     callback = CallbackList(callbacks)
     
     # Train!
     print("=" * 80)
-    print("Starting training...")
+    print("Starting fine-tuning...")
     print("=" * 80)
     print()
     
@@ -325,6 +299,7 @@ def main():
             callback=callback,
             log_interval=10,
             progress_bar=args.progress,
+            reset_num_timesteps=False # IMPORTANT: Continue step count from loaded model
         )
         
         print()
@@ -343,20 +318,14 @@ def main():
     model.save(str(final_path))
     print(f"✓ Saved final model: {final_path}.zip")
     
-    if args.normalize:
-        vecnorm_path = save_dir / "final_model_vecnorm.pkl"
-        train_env.save(str(vecnorm_path))
-        print(f"✓ Saved VecNormalize stats: {vecnorm_path}")
+    vecnorm_path = save_dir / "final_model_vecnorm.pkl"
+    train_env.save(str(vecnorm_path))
+    print(f"✓ Saved VecNormalize stats: {vecnorm_path}")
     
     print()
     print("=" * 80)
     print("View training progress:")
-    print(f"  tensorboard --logdir={tb_dir}")
-    print()
-    print("Test the trained agent:")
-    print(f"  python microgrid_safe_rl/scripts/evaluate.py \\")
-    print(f"    --model {final_path}.zip \\")
-    print(f"    --env_cfg {args.env_cfg}")
+    print(f"  tensorboard --logdir={tb_dir.parent}")
     print("=" * 80)
 
 

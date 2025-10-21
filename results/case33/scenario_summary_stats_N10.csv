@@ -1,0 +1,5 @@
+Scenario,Agent_Mean_Reward,Agent_Std_Reward,Baseline_Mean_Reward,Baseline_Std_Reward,Agent_Mean_Final_Served,Baseline_Mean_Final_Served,Agent_Mean_PF_Failures,Baseline_Mean_PF_Failures,Agent_Avg_Volt_Penalty,Baseline_Avg_Volt_Penalty
+Scenario 1 (Fault L2),2859.3179,142.1874,2339.0906,139.5432,0.8078,1.0000,0.0000,0.0000,-0.0532,-0.2756
+Scenario 2 (Fault L18),2978.2241,89.8938,2330.1418,139.9403,0.7224,1.0000,0.0000,0.0000,-0.1096,-0.3562
+Scenario 3 (Fault L6),2963.7605,100.7963,2369.6772,138.5455,0.7174,1.0000,0.0000,0.0000,0.0000,0.0000
+Scenario 4 (Fault L25),2364.9692,138.6789,2366.7703,138.6788,1.0000,1.0000,0.0000,0.0000,-0.0262,-0.0262

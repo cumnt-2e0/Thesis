@@ -315,7 +315,7 @@ def _add_switches(net, opts):
     }
 
 
-def ensure_single_internal_slack(net, slack_bus=None, p_cap_mw=1500.0, vm_set=1.0):
+def ensure_single_internal_slack(net, slack_bus=None, p_cap_mw=6000.0, vm_set=1.0):
     """
     Remove ext_grid and create internal slack generator.
     
@@ -375,7 +375,7 @@ def ensure_single_internal_slack(net, slack_bus=None, p_cap_mw=1500.0, vm_set=1.
         # Set generous limits for slack
         net.gen.at[gidx, 'min_q_mvar'] = -1e4
         net.gen.at[gidx, 'max_q_mvar'] = 1e4
-        net.gen.at[gidx, 'min_p_mw'] = -p_cap_mw
+        net.gen.at[gidx, 'min_p_mw'] = 0.0
         net.gen.at[gidx, 'max_p_mw'] = p_cap_mw
         
         logger.info(f"  Using existing gen[{gidx}] at bus {slack_bus} as slack")
@@ -391,7 +391,7 @@ def ensure_single_internal_slack(net, slack_bus=None, p_cap_mw=1500.0, vm_set=1.
             slack=True,
             min_q_mvar=-1e4,
             max_q_mvar=1e4,
-            min_p_mw=-p_cap_mw,
+            min_p_mw= 0.0,
             max_p_mw=p_cap_mw,
         )
         logger.info(f"  Created new slack gen[{gidx}] at bus {slack_bus}")

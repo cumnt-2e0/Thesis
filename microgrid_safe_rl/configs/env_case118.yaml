@@ -14,11 +14,11 @@ voltage_limits: [0.95, 1.05]
 # ==== DER UNAVAILABILITY ====
 der_unavailability:
   enabled: true
-  p_deficit_frac: [0.10, 0.18]    
-  random_outage_prob: 0.10         # REDUCED: Less aggressive
-  max_disabled: 2
+  p_deficit_frac: [0.05, 0.10]    
+  random_outage_prob: 0.10        
+  max_disabled: 1
   max_der_size_mw: 5000.0
-  scaling_range: [0.8, 0.95]      # INCREASED lower bound
+  scaling_range: [0.8, 1.2]      
   protect_slack: true
   protect_sgen_on_slack_bus: true
 
@@ -63,27 +63,27 @@ cascade:
 stress:
   local_on_fault:
     enabled: false
-    on_every_trip: true
-    hops: 2
+    on_every_trip: false
+    hops: 1
     duration_steps: 25       
     accumulate: true
     gate_margin_pct: 1.0
   
   global:
-    load_scale_p: 1.15
-    line_rating_scale: 0.9
+    load_scale_p: 1.0
+    line_rating_scale: 1.0
 
 # ==== REWARD - EMPHASIZE RESTORATION ====
 reward_weights:
   tier1: 15.0                  # INCREASED: Critical loads more important
   tier2: 4.0
-  tier3: 1.0
+  tier3: 0.1
   volt_violation: -3.0         # REDUCED: Less penalty during restoration
   thermal_violation: -2.0      # REDUCED: Allow temporary overloads
   switch_cost: -0.05           # REDUCED: Encourage more switching
   restore_tier1_delta: 12.0    # INCREASED: Big reward for restoring critical
   pf_failure: -40.0            # REDUCED: Less harsh
-  bound_violation: -15.0       # REDUCED: Less harsh
+  bound_violation: -500.0       # REDUCED: Less harsh
 
 # ==== SAFETY ====
 safety:

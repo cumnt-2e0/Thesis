@@ -18,6 +18,8 @@ import pandapower as pp
 import pandapower.topology as top 
 from gymnasium import spaces
 
+from microgrid_safe_rl.augmentation.case145 import assign_priorities
+
 
 # ---------------- utils ---------------- #
 
@@ -843,77 +845,117 @@ class MicrogridControlEnv(gym.Env):
         cfg = self.stress_local_cfg
         hops = int(cfg.get("hops", 3))
         duration = int(cfg.get("duration_steps", 10))
-        
+
         # Find neighborhood
         neigh_lines: Set[int] = set()
         for li in seed_lines:
+            # Consider reducing hops for smaller networks like case33 if needed
             neigh_lines |= set(self._lines_adjacent_by_hops(self.net, int(li), hops=hops))
         neigh_lines |= set(seed_lines)
+        # Ensure lines exist in the current network state
+        neigh_lines = {line_idx for line_idx in neigh_lines if line_idx in self.net.line.index}
+
         buses = self._buses_around_lines(self.net, list(neigh_lines), hops=1)
-        
-        self.log.info(f"LOCAL_STRESS: targeting {len(neigh_lines)} lines, {len(buses)} buses")
-        
-        # CRITICAL: GRADUAL stress application
-        target = float(self.cascade_overload_min) + float(cfg.get("gate_margin_pct", 5.0))
+
+        self.log.info(f"LOCAL_STRESS: targeting {len(neigh_lines)} lines: {sorted(list(neigh_lines))}, "
+                      f"and {len(buses)} buses: {sorted(list(buses))}")
+
+        if not neigh_lines:
+             self.log.warning("LOCAL_STRESS: No valid neighbor lines found.")
+             return # Skip if no lines to target
+
+        target_gate = float(self.cascade_overload_min) + float(cfg.get("gate_margin_pct", 5.0))
         max_attempts = 10
-        
-        # Start with MILD stress
-        p_scale = 1.05  # Just 5% increase initially
-        line_scale = 0.95  # Just 5% derating
-        
+        initial_p_scale = 1.05
+        initial_line_scale = 0.95
+        ratchet_p = 1.10
+        ratchet_line = 0.95
+
+        current_p_scale = 1.0
+        current_line_scale = 1.0
+        last_max_loading = -1.0 # Initialize to track loading increase
+
+        # Apply initial mild stress first
+        self._scale_loads_at_buses(self.net, buses, p_scale=initial_p_scale, q_scale=1.0)
+        self._scale_line_ratings(self.net, neigh_lines, scale=initial_line_scale)
+        current_p_scale = initial_p_scale
+        current_line_scale = initial_line_scale
+
         for attempt in range(max_attempts):
-            # Apply incremental stress
-            if attempt > 0:  # Don't double-apply on first iteration
-                ratchet_p = 1.10  # Increase by 10% each time
-                ratchet_line = 0.95  # Decrease rating by 5% each time
-                
+            # Apply incremental stress (skip first attempt as initial was applied)
+            if attempt > 0:
                 self._scale_loads_at_buses(self.net, buses, p_scale=ratchet_p, q_scale=1.0)
                 self._scale_line_ratings(self.net, neigh_lines, scale=ratchet_line)
-                
-                p_scale *= ratchet_p
-                line_scale *= ratchet_line
-            else:
-                # First attempt: apply initial mild stress
-                self._scale_loads_at_buses(self.net, buses, p_scale=p_scale, q_scale=1.0)
-                self._scale_line_ratings(self.net, neigh_lines, scale=line_scale)
-            
+                current_p_scale *= ratchet_p
+                current_line_scale *= ratchet_line
+
             # Try to run PF
             ok = self._runpf()
             if not ok:
-                self.log.warning(f"STRESS attempt {attempt+1}: PF FAILED - backing off")
-                # Back off the last increment
-                if attempt > 0:
-                    self._scale_loads_at_buses(self.net, buses, p_scale=1.0/ratchet_p, q_scale=1.0)
-                    self._scale_line_ratings(self.net, neigh_lines, scale=1.0/ratchet_line)
-                    p_scale /= ratchet_p
-                    line_scale /= ratchet_line
+                self.log.warning(f"STRESS attempt {attempt+1}: PF FAILED - backing off last increment")
+                try: # Defensive back-off
+                    p_backoff = 1.0 / (ratchet_p if attempt > 0 else initial_p_scale)
+                    line_backoff = 1.0 / (ratchet_line if attempt > 0 else initial_line_scale)
+                    self._scale_loads_at_buses(self.net, buses, p_scale=p_backoff, q_scale=1.0)
+                    self._scale_line_ratings(self.net, neigh_lines, scale=line_backoff)
+                except Exception as e_bo:
+                    self.log.error(f"Error during stress back-off: {e_bo}")
+                break # Exit loop on PF failure
+
+            lp_series = self._get_derived_line_loading() # Calculate fresh derived loading
+            if lp_series.empty:
+                self.log.warning(f"STRESS attempt {attempt+1}: PF OK but derived loading is empty.")
+                max_neigh_loading = 0.0
+                loadings_dict = {}
+            else:
+                 # Filter for only the neighbor lines we are stressing
+                neighbor_loadings = lp_series.reindex(list(neigh_lines)).fillna(0.0)
+                if neighbor_loadings.empty:
+                    max_neigh_loading = 0.0
+                    loadings_dict = {}
+                else:
+                    max_neigh_loading = float(neighbor_loadings.max())
+                    top5_neigh = neighbor_loadings.nlargest(5)
+                    loadings_dict = {int(idx): f'{val:.1f}%' for idx, val in top5_neigh.items()}
+
+            self.log.info(f"STRESS attempt {attempt+1}: max_neigh={max_neigh_loading:.1f}% "
+                          f"(p_scale={current_p_scale:.2f}x, line_scale={current_line_scale:.2f}x) "
+                          f"top5_neigh={loadings_dict}")
+            # --- *** END OF UPDATE *** ---
+
+
+            # Check gate using the new max_neigh_loading
+            if max_neigh_loading >= target_gate:
+                self.log.info(f"GATE_ACHIEVED: {max_neigh_loading:.1f}% >= {target_gate:.1f}% ✓")
                 break
-            
-            # Check if we've achieved gate crossing
-            lp = self.net.res_line.loading_percent.reindex(self.net.line.index).fillna(0.0).astype(float)
-            corridor_max = float(lp.loc[list(neigh_lines)].max()) if neigh_lines else 0.0
-            
-            top5 = lp.loc[list(neigh_lines)].nlargest(5)
-            self.log.info(f"STRESS attempt {attempt+1}: max={corridor_max:.1f}% (p_scale={p_scale:.2f}x, "
-                        f"line_scale={line_scale:.2f}x) top5={[(i,f'{v:.1f}%') for i,v in top5.items()]}")
-            
-            if corridor_max >= target:
-                self.log.info(f"GATE_ACHIEVED: {corridor_max:.1f}% >= {target:.1f}% ✓")
+
+            # --- *** ADD STAGNATION CHECK *** ---
+            # Check if loading has increased *at all* compared to the last iteration
+            if attempt > 0 and max_neigh_loading <= last_max_loading + 0.1: # Check if stagnant (+0.1% tolerance)
+                 self.log.warning(f"STRESS: Loading stagnant at {max_neigh_loading:.1f}%. Stopping stress increase.")
+                 break
+            last_max_loading = max_neigh_loading
+            # --- *** END STAGNATION CHECK *** ---
+
+
+            # Safety limits (use current scales)
+            if current_p_scale >= 2.5 or current_line_scale <= 0.4: # Adjusted limits
+                self.log.warning(f"STRESS: reached safety limits (p={current_p_scale:.2f}x, line={current_line_scale:.2f}x) at max_neigh={max_neigh_loading:.1f}%")
                 break
-            
-            # Safety limits to prevent infinite escalation
-            if p_scale >= 2.0 or line_scale <= 0.5:
-                self.log.warning(f"STRESS: reached safety limits at {corridor_max:.1f}%")
-                break
-        
-        # Bookkeeping
+
+        # Bookkeeping (ensure indices are valid)
+        current_line_indices = set(self.net.line.index)
+        valid_neigh_lines = {idx for idx in neigh_lines if idx in current_line_indices}
+        valid_existing_stress_lines = {idx for idx in self._local_stress_lines if idx in current_line_indices}
+
         if cfg.get("accumulate", True):
-            self._local_stress_lines |= neigh_lines
+             self._local_stress_lines = valid_existing_stress_lines | valid_neigh_lines
         else:
-            self._local_stress_lines = neigh_lines
-        
+             self._local_stress_lines = valid_neigh_lines
+
         self._local_stress_active = True
         self._local_stress_expiry = (self.current_step + duration) if duration > 0 else None
+        self.log.info(f"LOCAL_STRESS applied. Active until step: {self._local_stress_expiry}. Stressed lines now: {sorted(list(self._local_stress_lines))}")
 
     # ======================= DEBUG / DIAGNOSTICS ======================= #
     def _debug_dump_cascade_state(self, prefix: str = "") -> None:
@@ -1048,6 +1090,39 @@ class MicrogridControlEnv(gym.Env):
         for stp, li in zip(self._seed_steps, chosen):
             self._events_by_step.setdefault(stp, []).append({"t": stp * self.step_seconds, "target": f"line:{li}", "op": "trip"})
 
+    def _get_derived_line_loading(self) -> pd.Series:
+        """Calculate line loading based on P/Q flow and ratings."""
+        if not hasattr(self.net, "res_line") or len(self.net.res_line) == 0:
+            return pd.Series(dtype=float) # Return empty series if no results
+
+        line_df = self.net.line
+        res_line_df = self.net.res_line.reindex(line_df.index) # Ensure alignment
+
+        p_mw = res_line_df['p_from_mw'].fillna(0.0)
+        q_mvar = res_line_df['q_from_mvar'].fillna(0.0)
+        s_mva = np.sqrt(p_mw**2 + q_mvar**2)
+
+        # Use max_i_ka for rating calculation if rating_mva isn't present
+        if 'rating_mva' not in line_df.columns and 'max_i_ka' in line_df.columns and hasattr(self.net, 'bus') and 'vn_kv' in self.net.bus.columns:
+            try: # Defensive calculation
+                vn_kv = self.net.bus.loc[line_df['from_bus'].values, 'vn_kv'].values
+                # Use np.maximum to avoid division by zero or negative ratings
+                ratings = np.maximum(1e-6, np.sqrt(3) * vn_kv * line_df['max_i_ka'].fillna(0.1).values)
+                rating_mva = pd.Series(ratings, index=line_df.index)
+                self.log.debug("Calculated rating_mva from max_i_ka for loading %")
+            except Exception as e:
+                self.log.warning(f"Failed to calculate rating_mva from max_i_ka: {e}. Using default.")
+                rating_mva = line_df.get('rating_mva', pd.Series(np.full(len(line_df), 5.0), index=line_df.index)).fillna(5.0) # Default
+        else:
+            # Use existing rating_mva or default
+            rating_mva = line_df.get('rating_mva', pd.Series(np.full(len(line_df), 5.0), index=line_df.index)).fillna(5.0) # Default
+
+        # Ensure rating_mva is non-zero before division
+        rating_mva = rating_mva.replace(0, 1e-6) # Replace zeros with a small number
+
+        loading_pct = (s_mva / rating_mva) * 100.0
+        return loading_pct.fillna(0.0)
+
     # -------- hazard/cascade tick -------- #
 
     def _f_load(self, li: int) -> float:
@@ -1088,7 +1163,7 @@ class MicrogridControlEnv(gym.Env):
         # Debug: show high-loaded lines
         high_loaded = [(i, load) for i, load in loading.items() if load > self.cascade_overload_min]
         if high_loaded:
-            self.log.info(f"CASCADE_CHECK: {len(high_loaded)} lines above {self.cascade_overload_min}%: {high_loaded[:5]}")
+            self.log.debug(f"CASCADE_CHECK: {len(high_loaded)} lines above {self.cascade_overload_min}%: {high_loaded[:5]}")
 
         # Update hold counters
         for li in list(self._hold.keys()):
@@ -1096,7 +1171,7 @@ class MicrogridControlEnv(gym.Env):
                 self._hold.pop(li, None)
 
         eligible = self._eligible_neighbors()
-        self.log.info(f"CASCADE_CHECK: {len(eligible)} eligible neighbors in corridor")
+        self.log.debug(f"CASCADE_CHECK: {len(eligible)} eligible neighbors in corridor")
         
         for li in self._eligible_neighbors():
             L = float(loading.loc[li])
@@ -1114,7 +1189,7 @@ class MicrogridControlEnv(gym.Env):
             if h >= self.cascade_min_hold and bool(self.net.line.at[li, "in_service"]) and li not in self._tripped
         ]
 
-        self.log.info(f"CASCADE_CHECK: {len(cands)} candidates met hold threshold")
+        self.log.debug(f"CASCADE_CHECK: {len(cands)} candidates met hold threshold")
         
         if not cands:
             return []
@@ -1808,9 +1883,13 @@ class MicrogridControlEnv(gym.Env):
             raise RuntimeError("Initial AC power flow failed at RESET")
 
         # 10) Log initial state
-        if hasattr(self.net, "res_line") and len(self.net.res_line):
-            top = self.net.res_line.loading_percent.sort_values(ascending=False).head(10)
-            self.log.info("RESET top line loads: %s", "; ".join(f"{i}:{v:.1f}%" for i, v in top.items()))
+        # --- Use derived loading for logging ---
+        derived_loading = self._get_derived_line_loading()
+        if not derived_loading.empty:
+            top = derived_loading.sort_values(ascending=False).head(10) # <-- Uses the reliable calculation
+            self.log.info("RESET top line loads: %s", "; ".join(f"{int(i)}:{v:.1f}%" for i, v in top.items()))
+        else:
+            self.log.warning("RESET: Could not determine line loads (PF likely failed).")
 
         obs = self._obs()
         f1, _, _ = self._served_fractions_by_tier()
