@@ -5,6 +5,7 @@ import logging
 from microgrid_safe_rl.feeders.registry import get_feeder
 from microgrid_safe_rl.augmentation.case145 import augment_case145
 from microgrid_safe_rl.augmentation.case33 import augment_case33
+from microgrid_safe_rl.augmentation.case118 import augment_case118
 from .microgrid_control_env import MicrogridControlEnv
 
 log = logging.getLogger("EnvFactory")
@@ -31,6 +32,12 @@ def make_env(env_id: str, config: dict, scenario: dict):
         log.info("AUG: calling augment_case145")
         net, info = augment_case145(net)
         log.info("AUG.OK: case145 augmented")
+
+    elif env_id_lower.startswith("case118"):
+        log.info("AUG: calling augment_case118")
+        net, info = augment_case118(net)
+        log.info(f"AUG.OK: case118 augmented - {info['n_buses']} buses, {info['n_loads']} loads "
+                 f"({info['n_critical_loads']} critical)")
         
     else:
         log.info(f"No augmentation for env_id={env_id}")

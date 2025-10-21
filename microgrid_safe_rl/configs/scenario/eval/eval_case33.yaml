@@ -1,0 +1,29 @@
+# Case33 evaluation with single line fault
+# Tests agent's reconfiguration ability
+
+name: "case33_eval_line_fault"
+description: "Single line fault + DER deficit"
+
+max_steps: 120
+step_seconds: 5.0
+
+# DER stress
+der_stress:
+  enabled: true
+  p_deficit_frac: [0.25, 0.30]  # Fixed 25-30% deficit
+  scaling_range: [0.70, 0.75]
+  random_outage_prob: 0.0  # Disable random outages for reproducibility
+  full_outage_prob: 0.0
+
+cascade:
+  enabled: false
+
+observation:
+  telemetry_latency_steps: 0
+  add_measurement_noise: false
+
+safety:
+  max_closed_ties: 1
+  voltage_margin_pu: 0.01
+  loading_margin_pct: 5.0
+  per_step_switch_budget: 1

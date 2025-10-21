@@ -1,6 +1,5 @@
 # microgrid_safe_rl/augmentation/case33.py
-# Augment IEEE 33-bus (case33bw) for microgrid PF + diagnostics.
-# IMPORTANT: No cascade logic here. We only ensure PF health and useful line ratings.
+# CRITICAL FIXES for case33bw training
 
 from __future__ import annotations
 import logging
@@ -26,9 +25,10 @@ def augment_case33(
     vm_pu_slack: float = 1.00,
     line_rating_mva: float = 5.0,
     run_pf_after: bool = True,
+    add_switches: bool = True,  # NEW: Add controllable switches
 ) -> Tuple[pp.pandapowerNet, Dict[str, Any]]:
     """
-    Prepare IEEE 33-bus (case33bw) for PF & diagnostics.
+    Prepare IEEE 33-bus (case33bw) for RL training.
     """
     if net is None:
         net = pn.case33bw()
@@ -39,6 +39,11 @@ def augment_case33(
         net.gen["slack"] = False
     
     _normalise_load_units_if_needed(net)
+    
+    # CRITICAL: Add controllable switches BEFORE other operations
+    if add_switches:
+        _add_controllable_switches(net)
+    
     _prepare_switches_case33(net, force_radial=force_radial)
     _force_lines_in_service(net)
     _fix_degenerate_line_params(net)
@@ -76,7 +81,7 @@ def augment_case33(
         "num_pv": int(len(net.sgen)) if hasattr(net, "sgen") else 0,
         "num_storage": int(len(net.storage)) if hasattr(net, "storage") else 0,
         "islanded": not keep_slack,
-        "has_slack": has_slack_gen or has_ext_grid,  # Add this for verification
+        "has_slack": has_slack_gen or has_ext_grid,
     }
 
     if run_pf_after:
@@ -89,15 +94,61 @@ def augment_case33(
     return net, meta
 
 
-# ------------------------------ Internals ---------------------------------- #
+# NEW FUNCTION: Add controllable switches for agent
+def _add_controllable_switches(net: pp.pandapowerNet) -> None:
+    """
+    Add controllable line switches to enable reconfiguration.
+    Strategy: Add switches on strategic lines (mid-feeder, branches).
+    """
+    if not hasattr(net, "line") or len(net.line) == 0:
+        LOG.warning("No lines to add switches to")
+        return
+    
+    # Identify strategic lines for switching
+    # 1. Mid-feeder lines (around 1/3 and 2/3 points)
+    # 2. Branch points (lines with multiple downstream loads)
+    
+    n_lines = len(net.line)
+    strategic_lines = []
+    
+    # Add switches at roughly 25%, 50%, 75% positions
+    strategic_lines.extend([
+        int(n_lines * 0.25),
+        int(n_lines * 0.50),
+        int(n_lines * 0.75),
+    ])
+    
+    # Add a few more at key branch points
+    if n_lines > 20:
+        strategic_lines.extend([5, 10, 15, 20, 25])
+    
+    # Deduplicate and ensure valid
+    strategic_lines = list(set([i for i in strategic_lines if 0 <= i < n_lines]))
+    
+    LOG.info(f"Adding {len(strategic_lines)} controllable switches on lines: {strategic_lines}")
+    
+    for line_idx in strategic_lines:
+        if line_idx not in net.line.index:
+            continue
+        
+        # Add normally-closed switch on this line
+        pp.create_switch(
+            net,
+            bus=int(net.line.at[line_idx, "from_bus"]),
+            element=int(line_idx),
+            et="l",  # line switch
+            closed=True,  # Start closed
+            type="LBS",  # Load break switch
+            name=f"SW_L{line_idx}"
+        )
+    
+    LOG.info(f"Added {len(strategic_lines)} controllable switches")
+
+
+# ------------------------------ Rest of functions unchanged ---------------------------------- #
 
 def _pick_internal_slack_bus(net: pp.pandapowerNet) -> int:
-    """
-    Choose a reasonable PCC for the island's reference:
-    1) If there's any existing gen, use its bus.
-    2) Else if there's a BESS or PV sgen, use the first one's bus.
-    3) Else fall back to bus 0.
-    """
+    """Choose a reasonable PCC for the island's reference."""
     try:
         if hasattr(net, "gen") and len(net.gen):
             return int(net.gen.bus.iloc[0])
@@ -112,9 +163,7 @@ def _pick_internal_slack_bus(net: pp.pandapowerNet) -> int:
 
 
 def _ensure_internal_slack(net: pp.pandapowerNet, vm_pu_slack: float = 1.0) -> None:
-    """
-    Ensure exactly one *internal* slack (a gen with slack=True) for islanded PF.
-    """
+    """Ensure exactly one *internal* slack (a gen with slack=True) for islanded PF."""
     # Remove any ext_grid first
     if hasattr(net, "ext_grid") and len(net.ext_grid):
         net.ext_grid.drop(net.ext_grid.index, inplace=True)
@@ -123,11 +172,10 @@ def _ensure_internal_slack(net: pp.pandapowerNet, vm_pu_slack: float = 1.0) -> N
     if hasattr(net, "gen") and len(net.gen) and "slack" in net.gen.columns:
         slack_mask = net.gen["slack"].astype(bool)
         if slack_mask.any():
-            # Keep only the first slack and ensure it's in service
             first_idx = net.gen.index[slack_mask][0]
             net.gen["slack"] = False
             net.gen.at[first_idx, "slack"] = True
-            net.gen.at[first_idx, "in_service"] = True  # CRITICAL: ensure it's on!
+            net.gen.at[first_idx, "in_service"] = True
             if "vm_pu" in net.gen.columns:
                 net.gen.at[first_idx, "vm_pu"] = float(vm_pu_slack)
             LOG.info(f"Using existing slack gen at index {first_idx}, set in_service=True")
@@ -135,31 +183,29 @@ def _ensure_internal_slack(net: pp.pandapowerNet, vm_pu_slack: float = 1.0) -> N
     
     # Create a new slack gen
     bus_idx = _pick_internal_slack_bus(net)
-    
-    # Size it to handle the total load + losses
     total_load = float(net.load["p_mw"].sum()) if len(net.load) else 10.0
-    gen_size = total_load * 1.2  # 20% margin for losses
+    gen_size = total_load * 1.2
     
     pp.create_gen(
         net,
         bus=bus_idx,
-        p_mw=0.0,  # Slack will balance power
+        p_mw=0.0,
         vm_pu=float(vm_pu_slack),
         slack=True,
         min_p_mw=-gen_size,
         max_p_mw=gen_size,
         controllable=True,
         name="internal_slack_gen",
-        in_service=True  # CRITICAL: must be True!
+        in_service=True
     )
     
     LOG.info(f"Created internal slack gen at bus {bus_idx} with capacity ±{gen_size:.1f} MW, in_service=True")
-    
+
+
 def _normalise_load_units_if_needed(net: pp.pandapowerNet) -> None:
     if len(net.load) == 0:
         return
     mean_load = float(net.load.p_mw.mean())
-    # Heuristic: if mean per-load > 5 MW on a 33-bus feeder, it's likely kW entered as MW.
     if mean_load > 5.0:
         LOG.warning(f"Loads look like kW (avg per-load {mean_load:.1f}); converting /1000 to MW")
         net.load["p_mw"] = net.load["p_mw"] / 1000.0
@@ -169,29 +215,20 @@ def _normalise_load_units_if_needed(net: pp.pandapowerNet) -> None:
 
 
 def _prepare_switches_case33(net: pp.pandapowerNet, *, force_radial: bool) -> None:
-    """
-    Close line-end switches and open bus-bus ties if present. case33bw typically
-    has no switches, so this is usually a no-op.
-    """
+    """Close line-end switches and open bus-bus ties if present."""
     if not hasattr(net, "switch") or len(net.switch) == 0:
-        LOG.info("No switches in case33bw (expected); proceeding without changes.")
+        LOG.info("No switches initially in case33bw")
         return
 
     sw = net.switch
     if "et" not in sw.columns:
         LOG.warning("Switch table missing 'et'; not forcing tie behaviour.")
-        # If we can't distinguish, best-effort: close switches pointing to line elements
-        line_ids = set(net.line.index.tolist()) if hasattr(net, "line") else set()
-        mask_line_guess = sw["element"].isin(line_ids)
-        n = int((~sw.loc[mask_line_guess, "closed"]).sum())
-        if n:
-            LOG.info(f"Closing {n} inferred line-end switches (heuristic).")
-            sw.loc[mask_line_guess, "closed"] = True
         return
 
     line_sw_mask = (sw["et"] == "l")
     busbus_mask = (sw["et"] == "b")
 
+    # Close all line switches by default
     n_line_to_close = int((~sw.loc[line_sw_mask, "closed"]).sum())
     if n_line_to_close > 0:
         LOG.info(f"Closing {n_line_to_close} line-end switches")
@@ -217,7 +254,7 @@ def _fix_degenerate_line_params(net: pp.pandapowerNet) -> None:
     if not hasattr(net, "line") or len(net.line) == 0:
         return
 
-    r_def, x_def, l_def = 0.0922, 0.0470, 1.0  # plausible defaults for 12.66 kV feeder modeling
+    r_def, x_def, l_def = 0.0922, 0.0470, 1.0
     zfix = False
 
     if "r_ohm_per_km" in net.line.columns:
@@ -239,15 +276,11 @@ def _fix_degenerate_line_params(net: pp.pandapowerNet) -> None:
             zfix = True
 
     if zfix:
-        LOG.warning("Line impedances/length were invalid; defaulted R/X and/or length to plausible values.")
+        LOG.warning("Line impedances/length were invalid; defaulted R/X and/or length.")
 
 
 def _ensure_line_ratings(net: pp.pandapowerNet, default_mva: float) -> None:
-    """
-    Provide a per-line rating used for diagnostics (% utilisation).
-    If plausible max_i_ka is available (<5 kA), compute MVA = √3 * U_kV * I_kA.
-    Otherwise, fall back to a uniform default (e.g., 5 MVA).
-    """
+    """Provide a per-line rating used for diagnostics."""
     if not hasattr(net, "line") or len(net.line) == 0:
         return
 
@@ -256,7 +289,7 @@ def _ensure_line_ratings(net: pp.pandapowerNet, default_mva: float) -> None:
 
     if "max_i_ka" in net.line.columns:
         ik = net.line.max_i_ka.to_numpy(dtype=float)
-        plausible = np.isfinite(ik) & (ik > 1e-6) & (ik < 5.0)  # ignore absurd sentinels like 99999
+        plausible = np.isfinite(ik) & (ik > 1e-6) & (ik < 5.0)
         rating[plausible] = (np.sqrt(3.0) * vn[plausible] * ik[plausible])
 
     net.line["rating_mva"] = rating
@@ -314,7 +347,7 @@ def _set_pf_options(net: pp.pandapowerNet) -> None:
         init="flat",
         enforce_q_lims=True,
         calculate_voltage_angles=True,
-        only_v_results=False,     # ensure branch results are computed
+        only_v_results=False,
         check_connectivity=True,
         trafo_model="t",
         recycle=None,
@@ -322,10 +355,7 @@ def _set_pf_options(net: pp.pandapowerNet) -> None:
 
 
 def _derived_line_loading_percent(net: pp.pandapowerNet) -> np.ndarray:
-    """
-    Compute loading % from PF p/q and rating_mva:
-    S[MVA] = sqrt(P^2 + Q^2) with P in MW, Q in MVAr.
-    """
+    """Compute loading % from PF p/q and rating_mva."""
     if not hasattr(net, "res_line") or len(net.res_line) == 0:
         return np.array([])
 
@@ -351,14 +381,12 @@ def _sanity_pf(net: pp.pandapowerNet) -> bool:
         LOG.error("✗ CRITICAL: res_load ≈ 0 MW — loads not powered.")
         return False
 
-    # Derived line loading should be non-trivial now
     if hasattr(net, "res_line") and len(net.res_line):
         derived = _derived_line_loading_percent(net)
         if derived.size == 0 or float(np.nanmax(derived)) < 0.05:
             LOG.error("✗ CRITICAL: Derived line loading ~0% — check ratings or topology.")
             return False
 
-    # Info only
     if hasattr(net, "res_bus") and len(net.res_bus):
         vmin = float(net.res_bus.vm_pu.min())
         vmax = float(net.res_bus.vm_pu.max())

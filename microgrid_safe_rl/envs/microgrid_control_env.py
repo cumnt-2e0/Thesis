@@ -18,8 +18,6 @@ import pandapower as pp
 import pandapower.topology as top 
 from gymnasium import spaces
 
-from microgrid_safe_rl.augmentation.case145 import assign_priorities
-
 
 # ---------------- utils ---------------- #
 
@@ -613,36 +611,52 @@ class MicrogridControlEnv(gym.Env):
     # -------- DER nUnavailability -------- # 
 
     def _apply_der_unavailability(self, seed=None):
-        """Reduce DER generation to force load curtailment."""
+        """Reduce DER generation to force load curtailment, without touching slack."""
         if not self.der_cfg or not self.der_cfg.get("enabled", False):
             return
-        
+
         rng = np.random.default_rng(seed)
-        
-        # Sample the bound fraction for this episode
+
+        # --- episode deficit bound ---
         lo, hi = self.der_cfg.get("p_deficit_frac", [0.1, 0.3])
         lo, hi = float(lo), float(max(hi, lo))
         deficit = rng.uniform(lo, hi)
         self._der_bound_frac_ep = float(np.clip(1.0 - deficit, 0.0, 1.0))
-        
         self.log.info(f"DER: episode bound fraction = {self._der_bound_frac_ep:.3f} (deficit={deficit:.1%})")
-        
-        # Calculate target generation
+
+        # --- load & target generation ---
         if len(self.net.load) and "p_base_mw" in self.net.load.columns:
             P_L = float(self.net.load["p_base_mw"].sum())
         else:
             P_L = float(self.net.load["p_mw"].sum()) if len(self.net.load) else 0.0
-        
         P_target = self._der_bound_frac_ep * P_L
-        
-        # Random outages (optional)
+
+        # --- identify protected assets (slack gen + sgen on slack bus, optional) ---
+        protect_slack = bool(self.der_cfg.get("protect_slack", True))
+        protect_sgen_slack_bus = bool(self.der_cfg.get("protect_sgen_on_slack_bus", True))
+
+        slack_gen_idx = []
+        slack_bus = None
+        if hasattr(self.net, "gen") and len(self.net.gen) and "slack" in self.net.gen.columns:
+            slack_gens = self.net.gen.index[self.net.gen["in_service"].astype(bool) & self.net.gen["slack"].astype(bool)]
+            slack_gen_idx = slack_gens.tolist()
+            if len(slack_gen_idx):
+                slack_bus = int(self.net.gen.loc[slack_gen_idx[0], "bus"])
+
+        protected_gen_idx = set(slack_gen_idx) if protect_slack else set()
+
+        protected_sgen_idx = set()
+        if protect_sgen_slack_bus and slack_bus is not None and hasattr(self.net, "sgen") and len(self.net.sgen):
+            protected_sgen_idx = set(self.net.sgen.index[self.net.sgen["bus"] == slack_bus])
+
+        # --- random outages (only allowed candidates) ---
         outage_p = float(self.der_cfg.get("random_outage_prob", 0.0))
         max_size = float(self.der_cfg.get("max_der_size_mw", 1e9))
         max_disabled = int(self.der_cfg.get("max_disabled", 2))
-        
+
         disabled = []
         disabled_count = 0
-        
+
         for tb in ("gen", "sgen"):
             if disabled_count >= max_disabled:
                 break
@@ -651,63 +665,97 @@ class MicrogridControlEnv(gym.Env):
             df = getattr(self.net, tb)
             if not len(df):
                 continue
-        
-            is_slack = df.get("slack", False) if tb == "gen" and "slack" in df.columns else pd.Series(False, index=df.index)
-            
-            if rng.random() < outage_p:
-                small = df[(df.in_service.astype(bool)) & (df.p_mw <= max_size) & (~is_slack)]
-                if len(small):
-                    idx = int(rng.choice(small.index))
+
+            if tb == "gen":
+                # exclude slack gens
+                cand_mask = df["in_service"].astype(bool) & (df["p_mw"] <= max_size)
+                if protect_slack and len(protected_gen_idx):
+                    cand_mask &= ~df.index.isin(list(protected_gen_idx))
+            else:
+                # exclude sgen on slack bus if configured
+                cand_mask = df["in_service"].astype(bool) & (df["p_mw"] <= max_size)
+                if protect_sgen_slack_bus and len(protected_sgen_idx):
+                    cand_mask &= ~df.index.isin(list(protected_sgen_idx))
+
+            if outage_p > 0 and (disabled_count < max_disabled) and rng.random() < outage_p:
+                cand_idx = df.index[cand_mask]
+                if len(cand_idx):
+                    idx = int(rng.choice(cand_idx))
                     disabled.append((tb, idx, float(df.at[idx, "p_mw"])))
                     df.at[idx, "in_service"] = False
                     disabled_count += 1
-                    self.log.info(f"DER_OUTAGE: {tb}[{idx}] = {df.at[idx, 'p_mw']:.2f} MW")
-        
-        # Scale remaining DER to target
+                    self.log.info(f"DER_OUTAGE: {tb}[{idx}] = {float(df.at[idx, 'p_mw']):.2f} MW")
+
+        # --- proportional scaling on remaining NON-protected assets ---
         s_lo, s_hi = self.der_cfg.get("scaling_range", [0.4, 0.9])
         s_lo, s_hi = float(s_lo), float(max(s_hi, s_lo))
-        
-        # Calculate current available generation
+
+        # available base generation from candidates only
         P_base_avail = 0.0
         for tb in ("gen", "sgen"):
             if not hasattr(self.net, tb):
                 continue
             df = getattr(self.net, tb)
-            m = df.in_service.astype(bool)
+            m = df["in_service"].astype(bool)
+            # remove protected rows from mask
+            if tb == "gen" and protect_slack and len(protected_gen_idx):
+                m &= ~df.index.isin(list(protected_gen_idx))
+            if tb == "sgen" and protect_sgen_slack_bus and len(protected_sgen_idx):
+                m &= ~df.index.isin(list(protected_sgen_idx))
+
+            if not m.any():
+                continue
+
             if "p_base_mw" in df.columns:
                 P_base_avail += float(df.loc[m, "p_base_mw"].sum())
             else:
                 P_base_avail += float(df.loc[m, "p_mw"].sum())
-        
+
         if P_base_avail > 1e-9:
             common_scale = float(np.clip(P_target / P_base_avail, s_lo, s_hi))
-            
+
             for tb in ("gen", "sgen"):
                 if not hasattr(self.net, tb):
                     continue
                 df = getattr(self.net, tb)
-                m = df.in_service.astype(bool)
+                m = df["in_service"].astype(bool)
+                # exclude protected rows from scaling mask
+                if tb == "gen" and protect_slack and len(protected_gen_idx):
+                    m &= ~df.index.isin(list(protected_gen_idx))
+                if tb == "sgen" and protect_sgen_slack_bus and len(protected_sgen_idx):
+                    m &= ~df.index.isin(list(protected_sgen_idx))
+
                 if not m.any():
                     continue
-                
-                # Add per-unit jitter
+
+                # per-unit jitter per asset (keeps diversity)
                 jitter = rng.uniform(s_lo, s_hi, size=int(m.sum()))
-                
                 if "p_base_mw" in df.columns:
                     df.loc[m, "p_mw"] = df.loc[m, "p_base_mw"].values * (common_scale * jitter)
                 else:
                     df.loc[m, "p_mw"] = df.loc[m, "p_mw"].values * (common_scale * jitter)
-        
-        # Log result
+
+        # --- log totals (including protected assets for visibility) ---
         P_online = 0.0
         for tb in ("gen", "sgen"):
             if not hasattr(self.net, tb):
                 continue
             df = getattr(self.net, tb)
-            P_online += float(df.loc[df.in_service.astype(bool), "p_mw"].sum())
-        
-        self.log.info(f"DER_SCALED: P_load={P_L:.1f} MW, P_target={P_target:.1f} MW, "
-                    f"P_online={P_online:.1f} MW, disabled={len(disabled)}")
+            P_online += float(df.loc[df["in_service"].astype(bool), "p_mw"].sum())
+
+        if len(slack_gen_idx):
+            self.log.info(
+                f"DER_SCALED: P_load={P_L:.1f} MW, P_target={P_target:.1f} MW, "
+                f"P_online={P_online:.1f} MW, disabled={len(disabled)} | "
+                f"protected slack gen(s)={slack_gen_idx} on bus {slack_bus}"
+            )
+        else:
+            self.log.info(
+                f"DER_SCALED: P_load={P_L:.1f} MW, P_target={P_target:.1f} MW, "
+                f"P_online={P_online:.1f} MW, disabled={len(disabled)} | "
+                f"no slack gen detected"
+            )
+
 
     # -------- localized stress overlay -------- #
 
@@ -1215,25 +1263,107 @@ class MicrogridControlEnv(gym.Env):
         return _clip01(m)
 
     def _sense_der_channels(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Sense DER (gen) channels with proper NaN handling."""
         if not hasattr(self.net, "gen") or not len(self.net.gen):
             return (np.zeros(0, np.float32),) * 5
+        
         g = self.net.gen
-        p_base = g.get("p_base_mw", g.get("p_mw", 1.0)).astype(float).replace(0.0, 1.0)
-        p_set = _clip01((g["p_mw"].astype(float) / p_base).values.astype(np.float32))
-        q_set = _clip01(np.zeros_like(p_set))
-        cap = np.maximum(1e-3, p_base.values.astype(float))
-        head_up = _clip01((cap - g["p_mw"].astype(float).values) / cap)
-        head_dn = _clip01(g["p_mw"].astype(float).values / cap)
-        der_avail = _clip01(_safe_bool_series(g.get("in_service", True), length=len(g)).astype(np.float32))
+        n_gen = len(g)
+        
+        # Get base power with safe fallback
+        if "p_base_mw" in g.columns:
+            p_base = g["p_base_mw"].astype(float).replace(0.0, 1.0).values
+        elif "p_mw" in g.columns:
+            p_base = g["p_mw"].astype(float).replace(0.0, 1.0).values
+        else:
+            p_base = np.ones(n_gen, dtype=float)
+        
+        # P setpoint (normalized)
+        if "p_mw" in g.columns:
+            p_mw = g["p_mw"].astype(float).fillna(0.0).values
+        else:
+            p_mw = np.zeros(n_gen, dtype=float)
+        
+        p_set = np.clip(p_mw / p_base, 0.0, 1.0)
+        p_set = np.nan_to_num(p_set, nan=0.0, posinf=1.0, neginf=0.0)
+        
+        # Q setpoint (normalized to base or just zeros)
+        # CRITICAL: Many gens don't have q_mvar, so default to zeros
+        if "q_mvar" in g.columns:
+            q_mvar = g["q_mvar"].astype(float).fillna(0.0).values
+            q_set = np.clip(q_mvar / p_base, -1.0, 1.0)
+            q_set = np.nan_to_num(q_set, nan=0.0, posinf=1.0, neginf=0.0)
+        else:
+            q_set = np.zeros(n_gen, dtype=float)
+        
+        # Capacity and headroom
+        cap = np.maximum(1e-3, p_base)
+        
+        # Upward headroom (how much more we can generate)
+        if "max_p_mw" in g.columns:
+            max_p = g["max_p_mw"].astype(float).values
+            # Replace NaN with cap values
+            max_p = np.where(np.isnan(max_p), cap, max_p)
+        else:
+            max_p = cap.copy()
+        
+        head_up = np.clip((max_p - p_mw) / cap, 0.0, 1.0)
+        head_up = np.nan_to_num(head_up, nan=0.0, posinf=1.0, neginf=0.0)
+        
+        # Downward headroom (how much we can reduce)
+        if "min_p_mw" in g.columns:
+            min_p = g["min_p_mw"].astype(float).values
+            min_p = np.where(np.isnan(min_p), 0.0, min_p)
+        else:
+            min_p = np.zeros(n_gen, dtype=float)
+        
+        head_dn = np.clip((p_mw - min_p) / cap, 0.0, 1.0)
+        head_dn = np.nan_to_num(head_dn, nan=0.0, posinf=1.0, neginf=0.0)
+        
+        # Availability flag
+        if "in_service" in g.columns:
+            der_avail = g["in_service"].astype(bool).values.astype(float)
+        else:
+            der_avail = np.ones(n_gen, dtype=float)
+        
+        # Final validation and type conversion
+        p_set = p_set.astype(np.float32)
+        q_set = q_set.astype(np.float32)
+        head_up = head_up.astype(np.float32)
+        head_dn = head_dn.astype(np.float32)
+        der_avail = der_avail.astype(np.float32)
+        
         return p_set, q_set, head_up, head_dn, der_avail
 
+
     def _sense_bess_channels(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Sense BESS (storage) channels with proper NaN handling."""
         if not hasattr(self.net, "storage") or not len(self.net.storage):
             return (np.zeros(0, np.float32),) * 3
+        
         st = self.net.storage
-        soc = _clip01((st.get("soc_percent", 50.0).astype(float).values / 100.0).astype(np.float32))
-        avail_chg = np.ones(len(st), dtype=np.float32)
-        avail_dis = np.ones(len(st), dtype=np.float32)
+        
+        # State of charge (0-1)
+        if "soc_percent" in st.columns:
+            soc_pct = st["soc_percent"].astype(float).fillna(50.0)
+            soc = np.clip(soc_pct.values / 100.0, 0.0, 1.0)
+        else:
+            soc = np.full(len(st), 0.5, dtype=float)  # Assume 50% if unknown
+        
+        soc = np.nan_to_num(soc, nan=0.5, posinf=1.0, neginf=0.0).astype(np.float32)
+        
+        # Available charge/discharge capacity (simplified to 1.0 if in service)
+        if "in_service" in st.columns:
+            in_svc = st["in_service"].astype(bool).values
+        else:
+            in_svc = np.ones(len(st), dtype=bool)
+        
+        # Can charge if: in service and SOC < 100%
+        avail_chg = (in_svc & (soc < 0.99)).astype(np.float32)
+        
+        # Can discharge if: in service and SOC > 0%
+        avail_dis = (in_svc & (soc > 0.01)).astype(np.float32)
+        
         return soc, avail_chg, avail_dis
 
     def _loads_per_bus_scaled(self) -> np.ndarray:
@@ -1585,78 +1715,48 @@ class MicrogridControlEnv(gym.Env):
         except Exception as e:
             self.log.error(f"Error checking loads: {e}")
 
+    def _recover_from_pf_failure(self):
+        """Try to recover from power flow failure by reverting to previous state."""
+        self.log.warning("Attempting PF failure recovery...")
+        
+        # Option 1: Revert to previous network state
+        try:
+            self.net = copy.deepcopy(self.prev)
+            ok = self._runpf()
+            if ok:
+                self.log.info("Recovery successful: reverted to previous state")
+                return True
+        except Exception as e:
+            self.log.error(f"Revert recovery failed: {e}")
+        
+        # Option 2: Shed some load to make problem feasible
+        try:
+            self.net = copy.deepcopy(self.prev)
+            if len(self.net.load):
+                # Shed 20% of lowest-priority loads
+                normal_loads = self.net.load[self.net.load.priority == 2]
+                if len(normal_loads):
+                    shed_indices = normal_loads.nlargest(max(1, len(normal_loads)//5), 'p_mw').index
+                    self.net.load.loc[shed_indices, 'p_mw'] *= 0.5
+                    ok = self._runpf()
+                    if ok:
+                        self.log.info(f"Recovery successful: shed {len(shed_indices)} loads")
+                        return True
+        except Exception as e:
+            self.log.error(f"Load-shed recovery failed: {e}")
+        
+        return False
 
     # ------------- gym api ------------- #
-
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         if seed is not None:
             np.random.seed(seed)
-        
-        # Copy base network
-        self.net = copy.deepcopy(self.net0)
-        
-        # CRITICAL: Ensure slack generator stays in service
-        if hasattr(self.net, "gen") and len(self.net.gen):
-            if "slack" in self.net.gen.columns:
-                slack_mask = self.net.gen["slack"].astype(bool)
-                if slack_mask.any():
-                    # Force slack generators to be in service
-                    self.net.gen.loc[slack_mask, "in_service"] = True
-                    self.log.debug(f"Forced {slack_mask.sum()} slack generator(s) to in_service=True")
-        
-        # Double-check we have a valid slack
-        has_slack = False
-        if hasattr(self.net, "gen") and len(self.net.gen) and "slack" in self.net.gen.columns:
-            slack_in_service = self.net.gen[self.net.gen["slack"] & self.net.gen["in_service"]]
-            has_slack = len(slack_in_service) > 0
-            if has_slack:
-                self.log.debug(f"Found {len(slack_in_service)} in-service slack generator(s)")
-        
-        has_ext_grid = hasattr(self.net, "ext_grid") and len(self.net.ext_grid) > 0
-        
-        if not has_slack and not has_ext_grid:
-            # Emergency: create a slack generator
-            self.log.warning("No in-service slack found after reset - creating emergency slack")
-            bus_idx = 0
-            if hasattr(self.net, "gen") and len(self.net.gen):
-                # Try to use an existing generator bus
-                bus_idx = int(self.net.gen.bus.iloc[0])
-            
-            total_load = float(self.net.load["p_mw"].sum()) if len(self.net.load) else 10.0
-            gen_size = total_load * 1.5  # 50% margin
-            
-            pp.create_gen(
-                self.net,
-                bus=bus_idx,
-                p_mw=0.0,
-                vm_pu=1.0,
-                slack=True,
-                min_p_mw=-gen_size,
-                max_p_mw=gen_size,
-                controllable=True,
-                name="emergency_slack_gen",
-                in_service=True  # MUST be True!
-            )
-            self.log.info(f"Created emergency slack at bus {bus_idx}, in_service=True")
-        
-        # Only close switches that should be closed at baseline
-        if hasattr(self.net, "switch") and not self.net.switch.empty:
-            if hasattr(self.net0, "switch"):
-                self.net.switch["closed"] = self.net0.switch["closed"].copy()
 
-        # Rest of your reset code remains the same...
-        # Initialize line state arrays to match current topology
-        nL = len(self.net.line) if hasattr(self.net, "line") else 0
-        if nL > 0:
-            in_service = self.net.line["in_service"].to_numpy()
-            self.line_on = in_service.copy()
-            self.line_failed = np.zeros(nL, dtype=bool)
-            self.line_tripped = np.zeros(nL, dtype=bool)
-            self.line_forced_off = np.zeros(nL, dtype=bool)
-            self.line_blocked = np.zeros(nL, dtype=bool)
-        
-        # Reset runtime state
+        # 1) Fresh copy of the healthy base network
+        self.net = copy.deepcopy(self.net0)
+
+        # 2) Re-init runtime state
         self.prev = copy.deepcopy(self.net)
         self.current_step = 0
         self.wall_time_s = 0.0
@@ -1667,7 +1767,7 @@ class MicrogridControlEnv(gym.Env):
         self.pf_fail_streak = 0
         self._prev_f1 = None
 
-        # Reset cascade state
+        # 3) Reset cascade state
         self._seed_steps.clear()
         self._seed_lines.clear()
         self._tripped.clear()
@@ -1678,61 +1778,36 @@ class MicrogridControlEnv(gym.Env):
         self._line_dist_cache.clear()
         self._bridge_lines = set()
 
-        # Reset local stress
+        # 4) Reset local stress bookkeeping
         self._local_stress_active = False
         self._local_stress_expiry = None
         self._local_stress_lines = set()
 
-        # Schedule random seed faults
-        self._seed_fault_schedule()
-
-        # Apply global stress (loads/ratings)
+        # 5) Apply GLOBAL stress (optional, from config) BEFORE baselines
         stress_cfg = self.stress_global or {}
         if stress_cfg:
             self._apply_global_stress(stress_cfg)
-        
-        # Apply DER unavailability BEFORE baseline snapshot
-        if self.der_cfg.get("enabled", False):
-            self._apply_der_unavailability(seed=seed)
-        else:
-            self._der_bound_frac_ep = 1.0
 
-        # CRITICAL: Don't let DER unavailability turn off slack!
-        if hasattr(self.net, "gen") and len(self.net.gen) and "slack" in self.net.gen.columns:
-            slack_mask = self.net.gen["slack"].astype(bool)
-            self.net.gen.loc[slack_mask, "in_service"] = True
-
-        # Snapshot baselines AFTER stress
+        # 6) Take baselines for reward & “freeze” logic (gen/storage)
         self._snapshot_baselines()
         self._enforce_frozen_generation()
 
-        # Debug: log slack status before PF
-        self.log.debug("Pre-PF slack check: gen=%s (in_service=%s), ext_grid=%s", 
-                    self.net.gen["slack"].any() if hasattr(self.net, "gen") and "slack" in self.net.gen.columns else False,
-                    self.net.gen[self.net.gen["slack"]]["in_service"].all() if hasattr(self.net, "gen") and "slack" in self.net.gen.columns and self.net.gen["slack"].any() else False,
-                    len(self.net.ext_grid) > 0 if hasattr(self.net, "ext_grid") else False)
+        # 7) Seed faults to occur during the episode (no faults *now*)
+        self._seed_fault_schedule()
 
-        # Initial power flow
+        # 8) DER unavailability 
+        if self.der_cfg.get("enabled", False):
+            self._apply_der_unavailability(seed=seed)
+            self._der_applied = True
+            self.log.info("DER unavailability applied at reset")
+
+        # 9) Initial PF on a clean, healthy system
         ok = self._runpf()
         if not ok:
-            # More detailed error logging
             self._diagnose_pf_failure()
             raise RuntimeError("Initial AC power flow failed at RESET")
 
-        # Expand auto-events (needs PF results)
-        scen = self.scenario or {"events": [], "repairs": []}
-        raw_events = list(scen.get("events", []))
-        if raw_events:
-            concrete = self._expand_auto_events(raw_events)
-            for ev in concrete:
-                t_sec = float(ev.get("t", 0.0))
-                step = int(round(t_sec / max(1e-9, self.step_seconds))) if "t" in ev else int(ev.get("step", 0))
-                self._events_by_step.setdefault(step, []).append(ev)
-
-        # Run PF again after any adjustments
-        self._runpf()
-
-        # Log initial state
+        # 10) Log initial state
         if hasattr(self.net, "res_line") and len(self.net.res_line):
             top = self.net.res_line.loading_percent.sort_values(ascending=False).head(10)
             self.log.info("RESET top line loads: %s", "; ".join(f"{i}:{v:.1f}%" for i, v in top.items()))
@@ -1742,27 +1817,30 @@ class MicrogridControlEnv(gym.Env):
         self._prev_f1 = float(f1)
         info = self._info_dict(pf_ok=True)
 
-        # Add diagnostic counts
-        live_by_status = int(np.count_nonzero(self.net.line.in_service.to_numpy()))
+        # Diagnostics
+        nL = len(self.net.line) if hasattr(self.net, "line") else 0
+        live_by_status = int(np.count_nonzero(self.net.line.in_service.to_numpy())) if nL else 0
         info["live_lines"] = live_by_status
-        
         self.log.info(f"RESET complete: live_lines={live_by_status}/{nL}, cascade_enabled={self.cascade_enabled}")
 
         return obs, info
+
+
 
     def step(self, action):
         self.prev = copy.deepcopy(self.net)
         self.current_step += 1
         self.wall_time_s += self.step_seconds
 
-        # Optional expiry of local stress overlay
+        # Optional expiry of local stress overlay (we keep it simple/persistent)
         if self._local_stress_active and self._local_stress_expiry is not None and self.current_step >= self._local_stress_expiry:
-            # Persisting overlay is simpler; skipping automatic revert to keep behavior deterministic under cascades.
-            self._local_stress_expiry = None  # stop checking further
+            self._local_stress_expiry = None
 
+        # Safety-filter intended action using last observed telemetry
         delayed_obs = self._obs_queue[-1] if len(self._obs_queue) else self._build_obs_vector_from_current_state()
         filtered_action, mask_info = self._safety_filter(action, delayed_obs)
 
+        # --- Apply switching / setpoint shedding action ---
         switches_used = 0
         S = self._switch_count
         if filtered_action <= 2 * S:
@@ -1774,7 +1852,7 @@ class MicrogridControlEnv(gym.Env):
                     switches_used = 1
                     self._switch_dwell[int(sw_id)] = self.safety.min_dwell_steps
             elif filtered_action == S:
-                pass
+                pass  # no-op
             else:
                 sw_idx = filtered_action - (S + 1)
                 if sw_idx < len(self.all_switch_ids):
@@ -1783,6 +1861,7 @@ class MicrogridControlEnv(gym.Env):
                     switches_used = 1
                     self._switch_dwell[int(sw_id)] = self.safety.min_dwell_steps
         else:
+            # optional: setpoint shedding entries (if enabled)
             if self.enable_setpoint_shedding and len(self.load_ids):
                 rel = filtered_action - (2 * S + 1)
                 if 0 <= rel < 2 * len(self.load_ids):
@@ -1803,10 +1882,11 @@ class MicrogridControlEnv(gym.Env):
                         q0 = float(self.net.load.at[lid, "q_base_mvar"])
                         self.net.load.at[lid, "q_mvar"] = q0 * (1.0 - sf)
 
+        # Decrement switch dwell timers
         for k in list(self._switch_dwell.keys()):
             self._switch_dwell[k] = max(0, int(self._switch_dwell[k]) - 1)
 
-        # Apply any scheduled event
+        # --- 1) Seed-line events at their scheduled steps (faults injected first) ---
         new_trips_applied: List[int] = []
         for ev in self._events_by_step.get(self.current_step, []):
             tgt = ev.get("target", "")
@@ -1822,39 +1902,56 @@ class MicrogridControlEnv(gym.Env):
             if lid is not None and lid in self._tripped and lid not in prev_tripped:
                 new_trips_applied.append(lid)
 
+        # Freeze generation/storage if controls disallow them
         self._enforce_frozen_generation()
 
+        # Run PF after scheduled seed(s)
         pf_ok = self._runpf()
 
-        # Perform cascade tick (probabilistic subfaults)
+        if not pf_ok:
+            pf_ok = self._recover_from_pf_failure()
+            if not pf_ok:
+                self._diagnose_pf_failure()
+
+        # --- 2) Cascade tick (may create additional trips); PF again if needed ---
         if pf_ok:
             new_trips = self._cascade_tick()
             if new_trips:
                 pf_ok = self._runpf()
+                if not pf_ok:
+                    pf_ok = self._recover_from_pf_failure()
         else:
             new_trips = []
 
+        # --- bookkeeping / reward / termination ---
         if not pf_ok:
             self.pf_fail_streak += 1
         else:
             self.pf_fail_streak = 0
+
         reward, comps = self._reward(switches_used=switches_used)
         if not pf_ok:
             comps["pf_fail"] = float(self.pf_failure_penalty)
+
         obs = self._obs()
         done = (self.current_step >= self.max_steps) or (self.pf_fail_streak >= self.failure_patience)
         info = self._info_dict(pf_ok=pf_ok)
         info.update(mask_info)
         info["reward_components"] = comps
 
-        # Debug only (for sanity.py)
+        # Attach event diagnostics for tests
         applied = [f"{ev.get('target','?')} {ev.get('op','?')}" for ev in self._events_by_step.get(self.current_step, [])]
         if new_trips:
             applied.extend([f"line:{li} trip(cascade)" for li in new_trips])
         if applied:
             info["events_applied"] = applied
+        # Optional: expose count for training metrics that expect it
+        if new_trips or new_trips_applied:
+            info["cascade_trips"] = int(len(new_trips))
 
         return obs, reward, bool(done), False, info
+
+
 
     # ------------- power flow ------------- #
 

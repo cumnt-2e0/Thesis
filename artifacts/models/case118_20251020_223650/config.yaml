@@ -1,0 +1,125 @@
+agent:
+  algo: ppo
+  ppo:
+    batch_size: 1024
+    clip_range: 0.2
+    ent_coef: 0.0
+    gae_lambda: 0.95
+    gamma: 0.995
+    learning_rate: 0.0003
+    max_grad_norm: 0.5
+    n_epochs: 10
+    n_steps: 4096
+    normalize_advantage: true
+    policy: MlpPolicy
+    policy_kwargs:
+      activation_fn: !!python/name:torch.nn.modules.activation.ReLU ''
+      net_arch:
+        pi:
+        - 256
+        - 256
+        vf:
+        - 256
+        - 256
+    use_sde: false
+    vf_coef: 0.5
+env:
+  cascade:
+    alpha: 0.8
+    betaV: 0.5
+    d0: 4.0
+    enabled: true
+    exclude_bridges: false
+    hop_limit: 3
+    hysteresis_drop: 1.0
+    lambda0: 1.5
+    max_additional: 6
+    min_gap_steps: 2
+    min_hold_steps: 2
+    neighbor_sample_k: 0
+    overload_min_pct: 6.0
+    per_wave_max: 3
+    prob_loading_map:
+    - - 6.0
+      - 1.5
+    - - 8.0
+      - 2.0
+    - - 10.0
+      - 2.5
+    - - 12.0
+      - 3.0
+    rho0: 0.0
+    seed:
+      exclude_bridges: true
+      n_seeds: 1
+      step_window_frac:
+      - 0.15
+      - 0.25
+    zone_boost: 3.0
+  controls:
+    allow_generation_control: false
+    allow_load_shedding: false
+    allow_storage_control: false
+    allow_switching: true
+    allow_tie_closure: true
+  der_unavailability:
+    enabled: true
+    max_der_size_mw: 100.0
+    max_disabled: 2
+    p_deficit_frac:
+    - 0.25
+    - 0.35
+    random_outage_prob: 0.2
+    scaling_range:
+    - 0.6
+    - 0.85
+  enable_setpoint_shedding: false
+  network:
+    name: case118
+  observation:
+    add_measurement_noise: false
+    include_async_masks: false
+    telemetry_latency_steps: 0
+  reward_weights:
+    bound_violation: -15.0
+    pf_failure: -40.0
+    restore_tier1_delta: 12.0
+    switch_cost: -0.05
+    thermal_violation: -2.0
+    tier1: 15.0
+    tier2: 4.0
+    tier3: 1.0
+    volt_violation: -3.0
+  safety:
+    loading_margin_pct: 15.0
+    max_closed_ties: 2
+    min_dwell_steps: 1
+    per_step_switch_budget: 2
+    voltage_margin_pu: 0.03
+  stress:
+    global:
+      line_rating_scale: 0.5
+      load_scale_p: 1.0
+    local_on_fault:
+      accumulate: true
+      duration_steps: 15
+      enabled: true
+      gate_margin_pct: 3.0
+      hops: 2
+      on_every_trip: true
+  timing:
+    max_steps: 200
+    pf_failure_patience: 5
+    step_seconds: 5.0
+  voltage_limits:
+  - 0.95
+  - 1.05
+scenario:
+  events: []
+  name: baseline_empty
+  repairs: []
+training:
+  n_envs: 8
+  normalize: true
+  seed: 42
+  total_timesteps: 1000000

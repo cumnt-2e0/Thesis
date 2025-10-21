@@ -1,0 +1,112 @@
+# Minimal test config for case33 training
+env_id: case33
+
+# Time steps
+step_seconds: 5.0
+max_steps: 100  # Shorter for testing
+
+# Voltage limits
+voltage_limits: [0.95, 1.05]
+
+# Power flow
+pf_failure_patience: 3
+
+# Reward weights - SIMPLIFIED
+reward_weights:
+  tier1: 10.0      # Critical loads
+  tier2: 3.0       # Important loads  
+  tier3: 1.0       # Normal loads
+  volt_violation: -2.0
+  thermal_violation: -1.0
+  switch_cost: -0.1
+  restore_tier1_delta: 5.0
+  pf_failure: -50.0
+  bound_violation: -20.0
+
+# Safety constraints
+safety:
+  max_closed_ties: 1
+  voltage_margin_pu: 0.01
+  loading_margin_pct: 5.0
+  per_step_switch_budget: 1
+  min_dwell_steps: 1
+
+# Controls - ENABLE SWITCHING
+controls:
+  allow_generation_control: false
+  allow_storage_control: false
+
+# Load shedding
+enable_setpoint_shedding: true
+shed_step: 0.1
+
+# Observation settings - MINIMAL NOISE
+observation:
+  telemetry_latency_steps: 0
+  include_async_masks: false
+  add_measurement_noise: false
+  noise_std:
+    voltage_pu: 0.0
+    loading_pct: 0.0
+
+# CASCADE - SIMPLIFIED FOR TESTING
+cascade:
+  enabled: true
+  
+  # Seed faults (scripted)
+  seed:
+    n_seeds: 1              # Just 1 fault per episode
+    step_window_frac: [0.1, 0.3]  # Early in episode
+    exclude_bridges: true
+  
+  # Cascade parameters - CONSERVATIVE
+  hop_limit: 2
+  neighbor_sample_k: 0
+  overload_min_pct: 120.0    # Higher threshold
+  min_hold_steps: 2          # Require sustained overload
+  hysteresis_drop: 5.0
+  
+  # Probabilities - LOW for testing
+  lambda0: 0.05              # Base hazard rate (reduced)
+  rho0: 0.90
+  alpha: 2.0
+  betaV: 1.0
+  zone_boost: 1.2
+  d0: 3.0
+  
+  per_wave_max: 1            # Max 1 cascade trip per step
+  max_additional: 3          # Max 3 total cascade trips
+  min_gap_steps: 2
+  exclude_bridges: true
+  
+  prob_loading_map:
+    - [120.0, 0.3]           # 30% prob at 120% loading
+    - [130.0, 0.6]           # 60% prob at 130%
+    - [140.0, 0.9]           # 90% prob at 140%
+
+# Stress - DISABLED FOR INITIAL TESTING
+stress:
+  global:
+    load_scale_p: 1.0
+    load_scale_q: 1.0
+    line_rating_scale: 1.0
+    gen_cap_scale: 1.0
+  
+  local_on_fault:
+    enabled: false           # Disable local stress for now
+    hops: 2
+    duration_steps: 5
+    p_scale: 1.2
+    q_scale: 1.0
+    line_rating_scale: 0.85
+    on_every_trip: true
+    accumulate: true
+
+# DER unavailability - MODERATE FOR TESTING
+der_unavailability:
+  enabled: true
+  p_deficit_frac: [0.15, 0.25]  # 15-25% generation deficit
+  scaling_range: [0.6, 0.9]
+  random_outage_prob: 0.1
+  max_der_size_mw: 0.5
+  max_disabled: 1
